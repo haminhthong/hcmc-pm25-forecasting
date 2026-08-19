@@ -1,0 +1,4 @@
+{
+  "status": "Chưa huấn luyện",
+  "instruction": "Chạy python -m src.train --config configs/config.yaml để tạo model và metadata của lần chạy."
+}
