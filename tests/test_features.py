@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.data import validate_schema
+from src.data import audit_air_quality, validate_schema
 from src.features import build_features
 
 
@@ -17,12 +17,33 @@ def test_schema_csv():
 
 
 def test_sort_and_lag_do_not_use_future():
-    frame = pd.DataFrame({
-        "timestamp": pd.to_datetime(["2024-01-01 02:00", "2024-01-01 00:00", "2024-01-01 01:00"]),
-        "station": ["A", "A", "A"], "PM2.5": [30.0, 10.0, 20.0], "O3": [1, 1, 1], "SO2": [1, 1, 1],
-    })
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-01 02:00", "2024-01-01 00:00", "2024-01-01 01:00"]
+            ),
+            "station": ["A", "A", "A"],
+            "PM2.5": [30.0, 10.0, 20.0],
+            "O3": [1, 1, 1],
+            "SO2": [1, 1, 1],
+        }
+    )
     result = build_features(frame, CONFIG)
     assert result["timestamp"].is_monotonic_increasing
     assert pd.isna(result.iloc[0]["PM2.5_lag_1"])
     assert result.iloc[1]["PM2.5_lag_1"] == 10.0
 
+
+def test_data_audit_detects_duplicates_and_gaps():
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-01 00:00", "2024-01-01 00:00", "2024-01-01 03:00"]
+            ),
+            "station": ["A", "A", "A"],
+            "PM2.5": [10.0, 10.0, 12.0],
+        }
+    )
+    report = audit_air_quality(frame, CONFIG)
+    assert report["duplicate_station_timestamps"] == 2
+    assert report["irregular_hourly_gaps"] >= 1

@@ -14,6 +14,8 @@ features:
   exogenous_columns: [TSP, NO2, SO2, CO, O3, temperature, humidity]
 split:
   test_fraction: 0.2
+  backtest_folds: 3
+  minimum_train_rows: 24
 model:
   name: random_forest
   params:
@@ -21,6 +23,9 @@ model:
     max_depth: 12
     min_samples_leaf: 2
     n_jobs: -1
+model_comparison:
+  enabled: true
+  candidates: [random_forest, extra_trees, hist_gradient_boosting]
 thresholds:
   good_max: 12.0
   moderate_max: 35.5
@@ -28,8 +33,8 @@ artifacts:
   directory: artifacts
   model_file: model.joblib
   metadata_file: metadata.json
+  evaluation_file: evaluation.json
 mlflow:
   enabled: false
   tracking_uri: mlruns
   experiment_name: hcmc-pm25-next-hour
-

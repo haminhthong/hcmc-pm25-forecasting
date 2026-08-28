@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Tạo đặc trưng thời gian và lịch sử mà không sử dụng dữ liệu tương lai."""
+
 from typing import Any
 
 import numpy as np
@@ -7,6 +9,7 @@ import pandas as pd
 
 
 def add_time_features(frame: pd.DataFrame, timestamp_column: str) -> pd.DataFrame:
+    """Mã hóa giờ theo chu kỳ và bổ sung thứ trong tuần."""
     result = frame.copy()
     hour = result[timestamp_column].dt.hour
     result["hour_sin"] = np.sin(2 * np.pi * hour / 24)
@@ -36,8 +39,16 @@ def build_features(frame: pd.DataFrame, config: dict[str, Any], include_target: 
 
 
 def model_feature_columns(config: dict[str, Any]) -> list[str]:
+    """Trả về danh sách cột đầu vào theo đúng thứ tự của model."""
     target = config["data"]["target_column"]
     history = [f"{target}_lag_{lag}" for lag in config["features"]["lags"]]
     rolling = [f"{target}_rolling_mean_{window}" for window in config["features"]["rolling_windows"]]
-    return [target, *history, *rolling, *config["features"]["exogenous_columns"], "hour_sin", "hour_cos", "day_of_week"]
-
+    return [
+        target,
+        *history,
+        *rolling,
+        *config["features"]["exogenous_columns"],
+        "hour_sin",
+        "hour_cos",
+        "day_of_week",
+    ]

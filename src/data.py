@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Đọc, kiểm tra và lập báo cáo chất lượng dữ liệu quan trắc."""
+
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +10,7 @@ import yaml
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
+    """Đọc cấu hình YAML từ đường dẫn được cung cấp."""
     with Path(path).open(encoding="utf-8") as file:
         return yaml.safe_load(file)
 
@@ -28,18 +31,42 @@ def resolve_data_path(configured_path: str | Path) -> Path:
 
 
 def validate_schema(frame: pd.DataFrame, required_columns: list[str]) -> None:
+    """Kiểm tra sự hiện diện của các cột bắt buộc trong bảng dữ liệu."""
     missing = sorted(set(required_columns) - set(frame.columns))
     if missing:
         raise ValueError(f"CSV thiếu cột bắt buộc: {', '.join(missing)}")
 
 
+def audit_air_quality(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
+    """Tạo báo cáo chất lượng dữ liệu không làm thay đổi dữ liệu đầu vào."""
+    data_config = config["data"]
+    timestamp = data_config["timestamp_column"]
+    station = data_config["station_column"]
+    target = data_config["target_column"]
+    duplicate_mask = frame.duplicated([station, timestamp], keep=False)
+    ordered = frame.sort_values([station, timestamp], kind="stable")
+    gaps = ordered.groupby(station)[timestamp].diff().dropna()
+    return {
+        "rows": int(len(frame)),
+        "stations": int(frame[station].nunique()),
+        "period": [str(frame[timestamp].min()), str(frame[timestamp].max())],
+        "duplicate_station_timestamps": int(duplicate_mask.sum()),
+        "missing_by_column": {column: int(value) for column, value in frame.isna().sum().items()},
+        "non_positive_target": int((frame[target] <= 0).sum()),
+        "irregular_hourly_gaps": int((gaps != pd.Timedelta(hours=1)).sum()),
+    }
+
+
 def load_air_quality(config: dict[str, Any]) -> pd.DataFrame:
+    """Đọc và chuẩn hóa dữ liệu chất lượng không khí theo cấu hình."""
     data_config = config["data"]
     frame = pd.read_csv(resolve_data_path(data_config["path"]))
     validate_schema(frame, data_config["required_columns"])
     timestamp = data_config["timestamp_column"]
     station = data_config["station_column"]
     target = data_config["target_column"]
+
+    # Tạo các cột tùy chọn còn thiếu để pipeline train và inference đồng nhất.
     for column in data_config.get("optional_columns", []):
         if column not in frame:
             frame[column] = pd.NA
@@ -47,7 +74,12 @@ def load_air_quality(config: dict[str, Any]) -> pd.DataFrame:
     frame[target] = pd.to_numeric(frame[target], errors="coerce")
     if frame[timestamp].isna().any():
         raise ValueError("Cột thời gian chứa giá trị không hợp lệ.")
+    if frame[station].isna().any():
+        raise ValueError("Cột trạm chứa giá trị thiếu.")
+    if frame.duplicated([station, timestamp]).any():
+        raise ValueError("Dữ liệu có station/timestamp trùng lặp.")
     if data_config.get("zero_as_missing", False):
+        # Chỉ áp dụng quy tắc sentinel khi người dùng bật rõ ràng trong cấu hình.
         for column in ("TSP", target):
             if column in frame:
                 frame.loc[frame[column] <= 0, column] = pd.NA

@@ -9,7 +9,7 @@ venv/
 mlruns/
 artifacts/*.joblib
 artifacts/*.png
+artifacts/evaluation.json
 data/*.csv
 !data/sample/*.csv
 .streamlit/secrets.toml
-

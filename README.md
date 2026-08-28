@@ -2,7 +2,26 @@
 
 Repository tái lập cho bài toán dự báo nồng độ PM2.5 trước một giờ theo từng trạm quan trắc. Dự án tách phần chạy thực tế khỏi notebook: notebook chỉ giải thích thí nghiệm, còn huấn luyện, API và dashboard dùng các mô-đun trong `src/` và `app/`.
 
-> **Phạm vi sử dụng:** đây là mô hình dự báo thử nghiệm, không phải hệ thống cảnh báo sức khỏe chính thức. Kết quả đã quan sát trước đây cho thấy recall của lớp PM2.5 cao chỉ 0,638, bỏ sót 211/583 sự kiện (khoảng 36%) và MAE ở nhóm này là 8,980 µg/m³. Hiệu năng cũng thay đổi theo thời gian: rolling MAE 3,636 ± 1,109 so với test MAE 2,896. Các con số này cần được kiểm chứng lại trên đúng dữ liệu và phiên bản pipeline hiện tại.
+> **Phạm vi sử dụng:** đây là mô hình dự báo thử nghiệm, không phải hệ thống cảnh báo sức khỏe chính thức. Repository không công bố metric lịch sử chưa tái tạo được. Điểm sinh từ dữ liệu tổng hợp chỉ dùng để kiểm tra kỹ thuật.
+
+## Kiến trúc
+
+```text
+CSV + data contract
+        │
+        ▼
+Data audit → Feature engineering chống leakage
+        │
+        ▼
+Expanding backtest: RF / Extra Trees / HistGradientBoosting
+        │                         │
+        │                         └→ so sánh persistence / seasonal naive
+        ▼
+Chọn champion trên train folds → test cuối một lần
+        │
+        ├→ model.joblib + metadata.json + evaluation.json
+        └→ FastAPI / Streamlit
+```
 
 ## Bài toán và giá trị thực tế
 
@@ -27,16 +46,18 @@ Các cột `TSP`, `NO2`, `SO2`, `CO`, `O3`, `temperature`, `humidity` là tùy c
 1. Đọc cấu hình YAML và tìm CSV ở đường dẫn cấu hình, tương đối từ thư mục dự án, hoặc `/content/<tên-file>` trên Colab.
 2. Kiểm tra schema, chuyển kiểu thời gian và sắp xếp theo `station`, `timestamp`.
 3. Tạo lag PM2.5 1/2/3/6/12/24 giờ, rolling mean chỉ từ quá khứ và đặc trưng chu kỳ theo giờ.
-4. Chia train/test theo trật tự thời gian, không shuffle.
-5. Impute đặc trưng số, one-hot trạm và huấn luyện Random Forest.
-6. Ghi model, metadata, chỉ số hồi quy/phân lớp và confusion matrix; có thể bật MLflow.
+4. Giữ test cuối độc lập; chạy expanding-window backtest chỉ trên phần train.
+5. So sánh persistence, seasonal naive và ba candidate model; chọn champion theo MAE backtest trung bình.
+6. Fit lại champion trên toàn bộ train rồi đánh giá test đúng một lần.
+7. Quality gate kiểm tra champion có thực sự thắng persistence trên test cuối hay không.
+8. Ghi model, data audit, fold metrics, classification report, tail metrics và kết quả theo trạm; có thể bật MLflow.
 
 ### Chống data leakage
 
 - Mọi lag được tính bằng `groupby(station).shift(lag)` nên không trộn dữ liệu giữa trạm.
 - Rolling feature dùng `shift(1)` trước `rolling`, do đó quan sát cần dự báo không lọt vào cửa sổ quá khứ.
 - Nhãn là PM2.5 của giờ tiếp theo (`shift(-1)`) và chỉ dùng làm `y`.
-- Tập test nằm sau tập train theo thời gian. Với đánh giá nghiên cứu, nên bổ sung rolling/expanding validation theo từng giai đoạn và báo cáo trung bình ± độ lệch chuẩn.
+- Tập test nằm sau tập train theo thời gian. Model selection dùng expanding folds và báo cáo MAE trung bình ± độ lệch chuẩn; test cuối không tham gia chọn model.
 
 ## Quy tắc giá trị 0
 
@@ -66,7 +87,13 @@ pip install -r requirements.txt
 python -m src.train --config configs/config.yaml
 ```
 
-Model được lưu ở `artifacts/model.joblib`; thông tin lần chạy ở `artifacts/metadata.json`.
+Kiểm tra toàn bộ protocol/model selection mà không ghi artifact:
+
+```bash
+python -m src.train --config configs/config.yaml --dry-run
+```
+
+Model được lưu ở `artifacts/model.joblib`; thông tin lần chạy ở `artifacts/metadata.json`; báo cáo đầy đủ ở `artifacts/evaluation.json`.
 
 Chạy API:
 
@@ -104,6 +131,14 @@ docker build -t hcmc-air-quality-forecast .
 docker run --rm -p 8000:8000 hcmc-air-quality-forecast
 ```
 
+Chạy đồng thời API và dashboard:
+
+```bash
+docker compose up --build
+```
+
+API ở `http://localhost:8000/docs`, dashboard ở `http://localhost:8501`.
+
 ## Quản lý thí nghiệm với MLflow
 
 Đổi `mlflow.enabled` thành `true` trong cấu hình rồi chạy training. Mỗi run lưu tên mô hình, siêu tham số, danh sách đặc trưng, giai đoạn train/test, MAE, RMSE, Macro-F1, QWK, confusion matrix và model artifact.
@@ -120,31 +155,35 @@ Mở `http://localhost:5000` để so sánh các lần chạy. Khoảng thời g
 pytest -q
 ```
 
-Test bao phủ schema CSV, thứ tự thời gian, lag không dùng tương lai, xử lý thiếu O3/SO2, miền nhãn đầu ra và cấu trúc JSON của API. Workflow `.github/workflows/ci.yml` chạy pytest và smoke training khi push hoặc mở pull request.
+Test bao phủ schema CSV, data audit, thứ tự thời gian, lag không dùng tương lai, expanding folds không nhìn tương lai, xử lý thiếu O3/SO2, miền nhãn và JSON API. Workflow `.github/workflows/ci.yml` chạy pytest và smoke training khi push hoặc mở pull request.
 
 ## Kết quả và báo cáo
 
-Không đưa bảng điểm sinh từ dữ liệu mẫu vào báo cáo khoa học. Sau khi chạy dữ liệu thật, thay bảng dưới đây bằng kết quả có cùng time split/rolling folds:
+Repository chủ ý không hard-code bảng metric chưa tái tạo. Lệnh training tạo `evaluation.json` gồm:
 
-| Mô hình | MAE | RMSE | Macro-F1 | QWK | Rolling MAE |
-|---|---:|---:|---:|---:|---:|
-| Baseline persistence | cần chạy lại | cần chạy lại | cần chạy lại | cần chạy lại | cần chạy lại |
-| Random Forest | 2,896* | cần chạy lại | cần chạy lại | cần chạy lại | 3,636 ± 1,109* |
+- persistence và seasonal-naive baseline trên test cuối;
+- MAE mean/std và RMSE của từng candidate qua expanding folds;
+- MAE, RMSE, Macro-F1, QWK và confusion matrix của champion;
+- precision/recall/F1 theo ba lớp, high-PM2.5 recall và tail MAE;
+- metric theo từng trạm và data-quality audit.
+- quality gate và phần trăm cải thiện MAE so với persistence.
 
-\* Số liệu lịch sử do bản notebook trước báo cáo, chưa được tái tạo trong repository trống ban đầu. Không dùng để khẳng định hiệu năng của artifact hiện tại.
+Chỉ chuyển các số này vào README sau khi cấu hình trỏ tới dữ liệu thật có data card và giấy phép rõ ràng.
 
-Báo cáo chính thức cần thêm bảng theo từng lớp (precision/recall/F1/support), từng trạm, confusion matrix, MAE nhóm PM2.5 cao và biểu đồ sai số theo thời gian. Ảnh/GIF dashboard nên được tạo sau khi chạy bằng dữ liệu thật để tránh minh họa gây hiểu nhầm.
+Với dữ liệu mẫu tổng hợp hiện tại, dry-run cho thấy persistence tốt hơn model học máy. Đây là kết quả smoke test hữu ích: quality gate phải báo `không đạt`, và repository không được mô tả model này là champion sẵn sàng triển khai.
 
 ## Cấu trúc
 
 ```text
 ├── configs/config.yaml
 ├── data/sample/air_quality_sample.csv
+├── data/README.md
 ├── notebooks/01_experiment.ipynb
 ├── src/{data,features,train,evaluate,predict}.py
 ├── app/{api,dashboard}.py
 ├── tests/
 ├── artifacts/
+├── reports/figures/
 ├── Dockerfile
 └── requirements.txt
 ```
@@ -152,9 +191,8 @@ Báo cáo chính thức cần thêm bảng theo từng lớp (precision/recall/F
 ## Giới hạn
 
 - Dữ liệu mẫu là tổng hợp; chất lượng thật phụ thuộc dữ liệu nguồn, độ phủ trạm và drift theo mùa.
-- Chia test một lần chưa đủ để đánh giá ổn định; rolling validation dao động mạnh phải được công bố.
+- Expanding backtest giảm phụ thuộc vào một split nhưng vẫn cần đủ số mùa và giai đoạn ô nhiễm trên dữ liệu thật.
 - Mô hình chưa tối ưu recall cho sự kiện ô nhiễm cao và có thể bỏ sót cảnh báo quan trọng.
 - Ngưỡng 12 và 35,5 µg/m³ là cấu hình của dự án, không mặc nhiên tương đương tiêu chuẩn pháp lý hiện hành.
 - Độ tin cậy trên dashboard chưa được calibration.
 - Chưa mô hình hóa dự báo thời tiết, cháy, giao thông hoặc vận chuyển ô nhiễm không gian.
-

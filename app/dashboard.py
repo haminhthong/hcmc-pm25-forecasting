@@ -1,3 +1,7 @@
+"""Dashboard Streamlit minh họa kết quả dự báo theo trạm."""
+
+import os
+
 import pandas as pd
 import plotly.express as px
 import requests
@@ -10,6 +14,7 @@ st.set_page_config(page_title="Dự báo PM2.5 TP.HCM", layout="wide")
 st.title("Dự báo PM2.5 giờ tiếp theo")
 st.caption("Bản trình diễn nghiên cứu, không dùng thay cho hệ thống cảnh báo chính thức.")
 config = load_config("configs/config.yaml")
+api_url = os.getenv("PM25_API_URL", "http://localhost:8000")
 data = load_air_quality(config)
 station_column = config["data"]["station_column"]
 timestamp_column = config["data"]["timestamp_column"]
@@ -21,7 +26,11 @@ try:
     payload_history = history.copy()
     payload_history[timestamp_column] = payload_history[timestamp_column].astype(str)
     payload_history = payload_history.astype(object).where(pd.notna(payload_history), None)
-    response = requests.post("http://localhost:8000/predict", json={"observations": payload_history.to_dict("records")}, timeout=10)
+    response = requests.post(
+        f"{api_url}/predict",
+        json={"observations": payload_history.to_dict("records")},
+        timeout=10,
+    )
     response.raise_for_status()
     result = response.json()
     first, second, third = st.columns(3)
@@ -29,7 +38,11 @@ try:
     second.metric("Dự báo giờ tới", f"{result['predicted_pm25']:.1f} µg/m³")
     third.metric("Mức", result["level"])
     confidence = result.get("confidence")
-    st.caption(f"Độ tin cậy tương đối: {'chưa xác định' if confidence is None else f'{confidence:.0%}'} · Cập nhật: {result['updated_at']}")
+    confidence_text = "chưa xác định" if confidence is None else f"{confidence:.0%}"
+    st.caption(
+        f"Độ tin cậy tương đối: {confidence_text} · "
+        f"Cập nhật: {result['updated_at']}"
+    )
 except requests.RequestException:
     st.warning("Không kết nối được API. Hãy chạy: uvicorn app.api:app --reload")
 
