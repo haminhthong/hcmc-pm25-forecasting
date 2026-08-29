@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Tạo đặc trưng thời gian và lịch sử mà không sử dụng dữ liệu tương lai."""
+
+from __future__ import annotations
 
 from typing import Any
 
@@ -30,7 +30,9 @@ def build_features(frame: pd.DataFrame, config: dict[str, Any], include_target: 
         result[f"{target}_lag_{lag}"] = grouped_target.shift(lag)
     for window in config["features"]["rolling_windows"]:
         result[f"{target}_rolling_mean_{window}"] = grouped_target.transform(
-            lambda values: values.shift(1).rolling(window, min_periods=1).mean()
+            lambda values, current_window=window: values.shift(1)
+            .rolling(current_window, min_periods=1)
+            .mean()
         )
     result = add_time_features(result, timestamp)
     if include_target:

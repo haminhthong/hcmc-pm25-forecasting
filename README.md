@@ -87,6 +87,14 @@ pip install -r requirements.txt
 python -m src.train --config configs/config.yaml
 ```
 
+Môi trường phát triển và kiểm tra chất lượng code:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check src app tests
+pytest
+```
+
 Kiểm tra toàn bộ protocol/model selection mà không ghi artifact:
 
 ```bash

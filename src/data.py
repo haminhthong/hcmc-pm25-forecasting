@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Đọc, kiểm tra và lập báo cáo chất lượng dữ liệu quan trắc."""
+
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Any

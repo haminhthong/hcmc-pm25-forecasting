@@ -1,9 +1,9 @@
-from __future__ import annotations
-
 """Nạp artifact và dự báo PM2.5 cho quan trắc mới nhất."""
 
+from __future__ import annotations
+
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
@@ -55,5 +55,5 @@ class Predictor:
             "predicted_pm25": round(value, 3),
             "level": str(classify_pm25([value], thresholds["good_max"], thresholds["moderate_max"])[0]),
             "confidence": None if confidence is None else round(confidence, 3),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }

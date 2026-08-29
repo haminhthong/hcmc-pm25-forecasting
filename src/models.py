@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Khởi tạo các mô hình ứng viên từ tên cấu hình."""
+
+from __future__ import annotations
 
 from sklearn.base import RegressorMixin
 from sklearn.ensemble import (

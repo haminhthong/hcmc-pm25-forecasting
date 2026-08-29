@@ -9,7 +9,6 @@ import streamlit as st
 
 from src.data import load_air_quality, load_config
 
-
 st.set_page_config(page_title="Dự báo PM2.5 TP.HCM", layout="wide")
 st.title("Dự báo PM2.5 giờ tiếp theo")
 st.caption("Bản trình diễn nghiên cứu, không dùng thay cho hệ thống cảnh báo chính thức.")

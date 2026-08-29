@@ -11,6 +11,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -r requirements.txt
-      - run: pytest -q
-      - run: python -m src.train --config configs/config.yaml
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check src app tests
+      - run: pytest
+      - run: python -m src.train --config configs/config.yaml --dry-run

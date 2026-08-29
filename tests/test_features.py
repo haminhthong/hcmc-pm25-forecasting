@@ -4,7 +4,6 @@ import pytest
 from src.data import audit_air_quality, validate_schema
 from src.features import build_features
 
-
 CONFIG = {
     "data": {"station_column": "station", "timestamp_column": "timestamp", "target_column": "PM2.5"},
     "features": {"lags": [1], "rolling_windows": [2], "exogenous_columns": ["O3", "SO2"]},

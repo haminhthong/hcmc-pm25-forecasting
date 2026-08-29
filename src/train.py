@@ -1,22 +1,29 @@
-from __future__ import annotations
-
 """Huấn luyện, backtest, chọn champion và lưu artifact tái lập."""
+
+from __future__ import annotations
 
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
 import numpy as np
+import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from src.data import audit_air_quality, load_air_quality, load_config, resolve_data_path
-from src.evaluate import metrics_by_station, persistence_predictions, regression_and_classification_metrics, seasonal_naive_predictions
+from src.evaluate import (
+    metrics_by_station,
+    persistence_predictions,
+    regression_and_classification_metrics,
+    seasonal_naive_predictions,
+)
 from src.features import build_features, model_feature_columns
 from src.models import build_model
 from src.utils import sha256_file
@@ -49,7 +56,11 @@ def make_pipeline(config: dict, model_name: str) -> tuple[Pipeline, list[str]]:
     return Pipeline([("preprocess", preprocessor), ("model", model)]), [*numeric, station]
 
 
-def expanding_folds(size: int, folds: int, minimum_train_rows: int):
+def expanding_folds(
+    size: int,
+    folds: int,
+    minimum_train_rows: int,
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
     """Sinh expanding-window folds; validation luôn nằm sau train."""
     validation_size = max(1, (size - minimum_train_rows) // folds)
     for fold in range(folds):
@@ -59,7 +70,25 @@ def expanding_folds(size: int, folds: int, minimum_train_rows: int):
             yield np.arange(train_end), np.arange(train_end, validation_end)
 
 
-def evaluate_candidate(name: str, train_frame, config: dict, columns: list[str]) -> dict:
+def split_by_time(
+    frame: pd.DataFrame,
+    test_fraction: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Chia train/test theo vị trí thời gian, tuyệt đối không shuffle."""
+    cut = max(1, int(len(frame) * (1 - test_fraction)))
+    train_frame = frame.iloc[:cut].copy()
+    test_frame = frame.iloc[cut:].copy()
+    if test_frame.empty:
+        raise ValueError("Dữ liệu quá ít để tạo tập kiểm thử cuối theo thời gian.")
+    return train_frame, test_frame
+
+
+def evaluate_candidate(
+    name: str,
+    train_frame: pd.DataFrame,
+    config: dict,
+    columns: list[str],
+) -> dict:
     """Đánh giá một model trên toàn bộ expanding-window folds."""
     fold_metrics = []
     split = config["split"]
@@ -88,6 +117,67 @@ def evaluate_candidate(name: str, train_frame, config: dict, columns: list[str])
     }
 
 
+def evaluate_baselines(
+    test_frame: pd.DataFrame,
+    target: str,
+    thresholds: dict[str, float],
+) -> dict:
+    """Đánh giá hai baseline bắt buộc trên cùng tập test cuối."""
+    target_next_hour = test_frame["target_next_hour"]
+    return {
+        "persistence": regression_and_classification_metrics(
+            target_next_hour,
+            persistence_predictions(test_frame, target),
+            thresholds,
+        ),
+        "seasonal_naive_24h": regression_and_classification_metrics(
+            target_next_hour,
+            seasonal_naive_predictions(test_frame, target),
+            thresholds,
+        ),
+    }
+
+
+def build_quality_gate(champion_mae: float, persistence_mae: float) -> dict:
+    """Xác định model có thắng baseline persistence hay không."""
+    improvement = (
+        (persistence_mae - champion_mae) / persistence_mae
+        if persistence_mae
+        else None
+    )
+    passes_baseline = champion_mae < persistence_mae
+    return {
+        "passes_baseline": passes_baseline,
+        "mae_improvement_vs_persistence": improvement,
+        "status": "đạt" if passes_baseline else "không đạt",
+    }
+
+
+def save_artifacts(
+    pipeline: Pipeline,
+    metadata: dict,
+    evaluation: dict,
+    config: dict,
+) -> tuple[Path, Path]:
+    """Lưu model, metadata và báo cáo đánh giá bằng định dạng tái lập."""
+    artifact_dir = Path(config["artifacts"]["directory"])
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    model_path = artifact_dir / config["artifacts"]["model_file"]
+    evaluation_path = artifact_dir / config["artifacts"]["evaluation_file"]
+    metadata_path = artifact_dir / config["artifacts"]["metadata_file"]
+
+    joblib.dump(pipeline, model_path)
+    evaluation_path.write_text(
+        json.dumps(evaluation, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+    return model_path, evaluation_path
+
+
 def train(config_path: str, persist_artifacts: bool = True) -> dict:
     """Chạy pipeline huấn luyện đầy đủ và tùy chọn lưu artifact."""
     config = load_config(config_path)
@@ -101,10 +191,10 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
         .sort_values(timestamp, kind="stable")
         .reset_index(drop=True)
     )
-    cut = max(1, int(len(frame) * (1 - config["split"]["test_fraction"])))
-    train_frame, test_frame = frame.iloc[:cut].copy(), frame.iloc[cut:].copy()
-    if test_frame.empty:
-        raise ValueError("Dữ liệu quá ít để tạo tập kiểm thử cuối theo thời gian.")
+    train_frame, test_frame = split_by_time(
+        frame,
+        config["split"]["test_fraction"],
+    )
 
     _, columns = make_pipeline(config, config["model"]["name"])
     candidates = config.get("model_comparison", {}).get(
@@ -118,26 +208,16 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
     pipeline, columns = make_pipeline(config, champion)
     pipeline.fit(train_frame[columns], train_frame["target_next_hour"])
     prediction = pipeline.predict(test_frame[columns])
-    baselines = {
-        "persistence": regression_and_classification_metrics(
-            test_frame["target_next_hour"],
-            persistence_predictions(test_frame, target),
-            config["thresholds"],
-        ),
-        "seasonal_naive_24h": regression_and_classification_metrics(
-            test_frame["target_next_hour"],
-            seasonal_naive_predictions(test_frame, target),
-            config["thresholds"],
-        ),
-    }
-    metrics = regression_and_classification_metrics(test_frame["target_next_hour"], prediction, config["thresholds"])
-    baseline_mae = baselines["persistence"]["mae"]
-    improvement = (baseline_mae - metrics["mae"]) / baseline_mae if baseline_mae else None
-    quality_gate = {
-        "passes_baseline": bool(metrics["mae"] < baseline_mae),
-        "mae_improvement_vs_persistence": improvement,
-        "status": "đạt" if metrics["mae"] < baseline_mae else "không đạt",
-    }
+    baselines = evaluate_baselines(test_frame, target, config["thresholds"])
+    metrics = regression_and_classification_metrics(
+        test_frame["target_next_hour"],
+        prediction,
+        config["thresholds"],
+    )
+    quality_gate = build_quality_gate(
+        metrics["mae"],
+        baselines["persistence"]["mae"],
+    )
     artifact_dir = Path(config["artifacts"]["directory"])
     model_path = artifact_dir / config["artifacts"]["model_file"]
     evaluation = {
@@ -155,7 +235,7 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
     }
     evaluation_path = artifact_dir / config["artifacts"]["evaluation_file"]
     metadata = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "model_name": champion,
         "selection_rule": "MAE trung bình thấp nhất trên expanding-window backtest của tập train",
         "random_state": config["project"]["random_state"],
@@ -170,15 +250,7 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
         "evaluation_path": str(evaluation_path),
     }
     if persist_artifacts:
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(pipeline, model_path)
-        evaluation_path.write_text(
-            json.dumps(evaluation, ensure_ascii=False, indent=2, allow_nan=False),
-            encoding="utf-8",
-        )
-        (artifact_dir / config["artifacts"]["metadata_file"]).write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8"
-        )
+        save_artifacts(pipeline, metadata, evaluation, config)
         if config.get("mlflow", {}).get("enabled"):
             log_mlflow(config, metadata, evaluation, model_path)
     else:

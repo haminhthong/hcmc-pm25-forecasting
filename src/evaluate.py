@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Đánh giá hồi quy, phân lớp mức PM2.5 và các baseline thời gian."""
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
@@ -12,7 +12,6 @@ from sklearn.metrics import (
     mean_absolute_error,
     mean_squared_error,
 )
-
 
 VALID_LABELS = ("Tốt", "Trung bình", "Xấu")
 
