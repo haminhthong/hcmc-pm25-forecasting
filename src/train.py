@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -56,30 +55,41 @@ def make_pipeline(config: dict, model_name: str) -> tuple[Pipeline, list[str]]:
     return Pipeline([("preprocess", preprocessor), ("model", model)]), [*numeric, station]
 
 
-def expanding_folds(
-    size: int,
+def expanding_time_folds(
+    frame: pd.DataFrame,
+    timestamp_column: str,
     folds: int,
-    minimum_train_rows: int,
-) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """Sinh expanding-window folds; validation luôn nằm sau train."""
-    validation_size = max(1, (size - minimum_train_rows) // folds)
-    for fold in range(folds):
-        train_end = minimum_train_rows + fold * validation_size
-        validation_end = size if fold == folds - 1 else min(size, train_end + validation_size)
-        if train_end < validation_end:
-            yield np.arange(train_end), np.arange(train_end, validation_end)
+    minimum_train_periods: int,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Sinh expanding folds mà không tách các trạm tại cùng một thời điểm."""
+    periods = np.sort(frame[timestamp_column].unique())
+    validation_periods = periods[minimum_train_periods:]
+    if len(validation_periods) < folds:
+        raise ValueError("Dữ liệu quá ít mốc thời gian để tạo đủ backtest folds.")
+
+    result = []
+    for period_group in np.array_split(validation_periods, folds):
+        validation_start = period_group[0]
+        validation_end = period_group[-1]
+        train_mask = frame[timestamp_column] < validation_start
+        validation_mask = frame[timestamp_column].between(validation_start, validation_end)
+        result.append((np.flatnonzero(train_mask), np.flatnonzero(validation_mask)))
+    return result
 
 
 def split_by_time(
     frame: pd.DataFrame,
     test_fraction: float,
+    timestamp_column: str = "timestamp",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Chia train/test theo vị trí thời gian, tuyệt đối không shuffle."""
-    cut = max(1, int(len(frame) * (1 - test_fraction)))
-    train_frame = frame.iloc[:cut].copy()
-    test_frame = frame.iloc[cut:].copy()
-    if test_frame.empty:
+    """Chia theo mốc thời gian để mọi trạm cùng giờ nằm chung một phía."""
+    periods = np.sort(frame[timestamp_column].unique())
+    test_period_count = max(1, int(np.ceil(len(periods) * test_fraction)))
+    if test_period_count >= len(periods):
         raise ValueError("Dữ liệu quá ít để tạo tập kiểm thử cuối theo thời gian.")
+    test_start = periods[-test_period_count]
+    train_frame = frame[frame[timestamp_column] < test_start].copy()
+    test_frame = frame[frame[timestamp_column] >= test_start].copy()
     return train_frame, test_frame
 
 
@@ -92,8 +102,12 @@ def evaluate_candidate(
     """Đánh giá một model trên toàn bộ expanding-window folds."""
     fold_metrics = []
     split = config["split"]
-    for train_indices, validation_indices in expanding_folds(
-        len(train_frame), split["backtest_folds"], split["minimum_train_rows"]
+    timestamp = config["data"]["timestamp_column"]
+    for train_indices, validation_indices in expanding_time_folds(
+        train_frame,
+        timestamp,
+        split["backtest_folds"],
+        split["minimum_train_periods"],
     ):
         pipeline, _ = make_pipeline(config, name)
         train_fold = train_frame.iloc[train_indices]
@@ -194,6 +208,7 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
     train_frame, test_frame = split_by_time(
         frame,
         config["split"]["test_fraction"],
+        timestamp,
     )
 
     _, columns = make_pipeline(config, config["model"]["name"])
@@ -269,7 +284,7 @@ def log_mlflow(config: dict, metadata: dict, evaluation: dict, model_path: Path)
         scalar_metrics = {
             key: value
             for key, value in metadata["metrics"].items()
-            if isinstance(value, (int, float)) and value is not None
+            if isinstance(value, int | float) and value is not None
         }
         mlflow.log_metrics(scalar_metrics)
         mlflow.log_dict(metadata["features"], "features.json")

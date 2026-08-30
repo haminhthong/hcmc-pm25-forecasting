@@ -82,8 +82,7 @@ def persistence_predictions(frame: pd.DataFrame, target_column: str) -> np.ndarr
 
 def seasonal_naive_predictions(frame: pd.DataFrame, target_column: str) -> np.ndarray:
     """Baseline chu kỳ 24 giờ; fallback về persistence nếu lịch sử chưa đủ."""
-    lag_column = f"{target_column}_lag_24"
-    return frame[lag_column].fillna(frame[target_column]).to_numpy(dtype=float)
+    return frame["seasonal_naive_24h"].fillna(frame[target_column]).to_numpy(dtype=float)
 
 
 def metrics_by_station(

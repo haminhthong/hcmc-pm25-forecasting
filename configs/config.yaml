@@ -15,7 +15,7 @@ features:
 split:
   test_fraction: 0.2
   backtest_folds: 3
-  minimum_train_rows: 24
+  minimum_train_periods: 24
 model:
   name: random_forest
   params:

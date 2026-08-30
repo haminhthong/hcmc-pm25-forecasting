@@ -12,7 +12,40 @@ import yaml
 def load_config(path: str | Path) -> dict[str, Any]:
     """Đọc cấu hình YAML từ đường dẫn được cung cấp."""
     with Path(path).open(encoding="utf-8") as file:
-        return yaml.safe_load(file)
+        config = yaml.safe_load(file)
+    validate_config(config)
+    return config
+
+
+def validate_config(config: dict[str, Any]) -> None:
+    """Kiểm tra sớm các khóa và giá trị cấu hình quan trọng."""
+    required_sections = {"project", "data", "features", "split", "model", "thresholds", "artifacts"}
+    missing_sections = sorted(required_sections - set(config or {}))
+    if missing_sections:
+        raise ValueError(f"Cấu hình thiếu section: {', '.join(missing_sections)}")
+
+    test_fraction = config["split"].get("test_fraction")
+    if not isinstance(test_fraction, int | float) or not 0 < test_fraction < 1:
+        raise ValueError("split.test_fraction phải nằm trong khoảng (0, 1).")
+
+    folds = config["split"].get("backtest_folds")
+    minimum_periods = config["split"].get("minimum_train_periods")
+    if not isinstance(folds, int) or folds < 2:
+        raise ValueError("split.backtest_folds phải là số nguyên từ 2 trở lên.")
+    if not isinstance(minimum_periods, int) or minimum_periods < 1:
+        raise ValueError("split.minimum_train_periods phải là số nguyên dương.")
+
+    lags = config["features"].get("lags", [])
+    windows = config["features"].get("rolling_windows", [])
+    if not lags or any(not isinstance(value, int) or value < 1 for value in lags):
+        raise ValueError("features.lags phải chứa các số nguyên dương.")
+    if not windows or any(not isinstance(value, int) or value < 1 for value in windows):
+        raise ValueError("features.rolling_windows phải chứa các số nguyên dương.")
+
+    good_max = config["thresholds"].get("good_max")
+    moderate_max = config["thresholds"].get("moderate_max")
+    if good_max is None or moderate_max is None or good_max >= moderate_max:
+        raise ValueError("thresholds.good_max phải nhỏ hơn thresholds.moderate_max.")
 
 
 def resolve_data_path(configured_path: str | Path) -> Path:
@@ -53,7 +86,7 @@ def audit_air_quality(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
         "duplicate_station_timestamps": int(duplicate_mask.sum()),
         "missing_by_column": {column: int(value) for column, value in frame.isna().sum().items()},
         "non_positive_target": int((frame[target] <= 0).sum()),
-        "irregular_hourly_gaps": int((gaps != pd.Timedelta(hours=1)).sum()),
+        "irregular_hourly_gaps": int((gaps != pd.to_timedelta(1, unit="h")).sum()),
     }
 
 

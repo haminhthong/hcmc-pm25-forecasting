@@ -29,7 +29,19 @@ class Predictor:
         station_column = self.config["data"]["station_column"]
         timestamp_column = self.config["data"]["timestamp_column"]
         observations = observations.copy()
-        observations[timestamp_column] = pd.to_datetime(observations[timestamp_column])
+        if observations.empty:
+            raise ValueError("Cần ít nhất một quan trắc để dự báo.")
+        if observations[station_column].nunique(dropna=False) != 1:
+            raise ValueError("Mỗi request chỉ được chứa dữ liệu của một trạm.")
+
+        observations[timestamp_column] = pd.to_datetime(
+            observations[timestamp_column],
+            errors="coerce",
+        )
+        if observations[timestamp_column].isna().any():
+            raise ValueError("Request chứa timestamp không hợp lệ.")
+        if observations.duplicated([station_column, timestamp_column]).any():
+            raise ValueError("Request chứa timestamp trùng lặp trong cùng trạm.")
         featured = build_features(observations, self.config, include_target=False)
         latest = featured.sort_values(timestamp_column).iloc[[-1]]
         columns = [*model_feature_columns(self.config), station_column]
