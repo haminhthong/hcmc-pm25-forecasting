@@ -42,10 +42,11 @@ def validate_config(config: dict[str, Any]) -> None:
     if not windows or any(not isinstance(value, int) or value < 1 for value in windows):
         raise ValueError("features.rolling_windows phải chứa các số nguyên dương.")
 
-    good_max = config["thresholds"].get("good_max")
-    moderate_max = config["thresholds"].get("moderate_max")
-    if good_max is None or moderate_max is None or good_max >= moderate_max:
-        raise ValueError("thresholds.good_max phải nhỏ hơn thresholds.moderate_max.")
+    low_max = config["thresholds"].get("low_max", config["thresholds"].get("good_max"))
+    medium_max = config["thresholds"].get("medium_max", config["thresholds"].get("moderate_max"))
+    if low_max is None or medium_max is None or low_max >= medium_max:
+        raise ValueError("thresholds.low_max phải nhỏ hơn thresholds.medium_max.")
+
 
 
 def resolve_data_path(configured_path: str | Path) -> Path:

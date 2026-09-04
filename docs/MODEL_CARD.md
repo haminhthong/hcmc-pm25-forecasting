@@ -1,40 +1,45 @@
-# Model card — Next-hour PM2.5 forecasting
+# Model Card — Next-Hour PM2.5 Forecasting
 
 ## Mục đích
 
-Dự báo nồng độ PM2.5 sau một giờ cho từng trạm quan trắc tại TP.HCM. Artifact phục vụ nghiên cứu, minh họa kỹ thuật forecasting và demo API/dashboard; không dùng thay thế hệ thống cảnh báo sức khỏe chính thức.
+Tại thời điểm $t$, sử dụng dữ liệu quan trắc đã biết đến hết thời điểm $t$ của một trạm duy nhất để dự báo nồng độ PM2.5 tại mốc $t+1$ giờ. Artifact phục vụ trình diễn kỹ thuật Machine Learning Engineering, MLOps và API/dashboard; không dùng thay thế hệ thống cảnh báo sức khỏe chính thức.
 
 ## Đầu vào và đầu ra
 
-- Đầu vào: chuỗi quan trắc có `timestamp`, `station`, `PM2.5` và các biến ngoại sinh tùy chọn.
-- Đầu ra: PM2.5 dự báo, mức `Tốt`/`Trung bình`/`Xấu`, độ tin cậy tương đối và thời điểm cập nhật.
-- Tần suất kỳ vọng: một giờ.
-- Horizon: `t+1 giờ`.
+- **Đầu vào (Single Station)**:
+  - Timestamp tăng dần, liên tục theo giờ ($\Delta t = 1\text{h}$).
+  - Tối thiểu 25 mốc giờ lịch sử liên tục.
+  - Cột `PM2.5` hiện tại phải tồn tại và không âm.
+  - Các biến ngoại sinh ($O_3$, $SO_2$, $NO_2$, $CO$, $TSP$, nhiệt độ, độ ẩm) có thể thiếu.
+- **Đầu ra**:
+  - `forecast_origin`: Thời điểm $t$.
+  - `forecast_for`: Thời điểm $t+1$.
+  - `current_pm25`: Nồng độ PM2.5 hiện tại tại $t$.
+  - `predicted_pm25`: Nồng độ PM2.5 dự báo tại $t+1$.
+  - `level`: Mức phân tích nội bộ (`Thấp` / `Trung bình` / `Cao`).
+  - `interval`: Khoảng dự báo Split Conformal 90% (`lower`, `upper`, `coverage`).
+  - `model_version`: Phiên bản artifact.
+  - `updated_at`: Thời điểm API phản hồi.
 
-## Protocol lựa chọn model
+## Protocol Lựa Chọn & Quality Gate
 
-1. Tách test cuối theo timestamp; mọi trạm cùng giờ nằm chung một phía.
-2. Chạy expanding-window backtest trên phần train.
-3. Chọn model có MAE backtest trung bình thấp nhất.
-4. Fit lại champion trên toàn bộ train và đánh giá test đúng một lần.
-5. Chỉ xem model đạt quality gate nếu MAE test tốt hơn persistence.
+1. Tách tập test theo mốc thời gian sao cho `target_timestamp` ($t+1\text{h}$) của train strictly nhỏ hơn `test_start`.
+2. Chạy expanding-window backtest trên phần train với `target_timestamp` nhỏ hơn `validation_start` trong từng fold.
+3. Tính residual quantile 90% bằng Split Conformal Prediction.
+4. Đánh giá Quality Gate:
+   - $MAE_{\text{model}} \le MAE_{\text{persistence}} \times 0.95$
+   - Recall nhóm PM2.5 cao $\ge 0.75$
+   - Rolling MAE std $\le 1.0$
+5. Nếu mô hình không vượt baseline hoặc không đạt Quality Gate, hệ thống sử dụng **Persistence Baseline** làm champion cho suy luận.
 
-## Metric
+## Metric Đánh Giá
 
-MAE và RMSE đo sai số nồng độ. Macro-F1, QWK, confusion matrix, recall lớp `Xấu` và high-PM2.5 MAE phản ánh chất lượng phân loại/tail. Kết quả còn được phân tách theo trạm.
+- Hồi quy: MAE, RMSE, Bias ($\text{mean}(\hat{y}-y)$), P90 Absolute Error.
+- Diễn giải: Macro-F1, High PM2.5 Recall, Confusion Matrix.
+- Theo trạm: Thống kê metric theo từng trạm quan trắc.
 
-## Hạn chế và rủi ro
+## Hạn Chế & Lưu Ý Nghiệp Vụ
 
-- Sample trong repository là dữ liệu tổng hợp, không chứng minh hiệu năng ngoài thực tế.
-- Độ tin cậy hiện tại dựa trên độ phân tán giữa cây và chưa calibration.
-- Dữ liệu môi trường có drift theo mùa, trạm và thiết bị.
-- Sai âm ở nhóm PM2.5 cao có rủi ro lớn hơn sai số trung bình thông thường.
-- Ngưỡng phân lớp là cấu hình dự án, không mặc nhiên là chuẩn pháp lý hiện hành.
-
-## Điều kiện trước khi triển khai thật
-
-- Data card và giấy phép dữ liệu hoàn chỉnh.
-- Quality gate thắng persistence ổn định qua nhiều giai đoạn.
-- Recall lớp ô nhiễm cao đạt ngưỡng do bên nghiệp vụ xác định.
-- Calibration, drift monitoring, rollback và lịch retraining được kiểm chứng.
+- Các mức `Thấp` / `Trung bình` / `Cao` là phân nhóm thử nghiệm nội bộ, không đại diện cho chỉ số AQI chính thức.
+- Mô hình chính là bài toán hồi quy nồng độ. Phân lớp chỉ là bước diễn giải phụ.
 

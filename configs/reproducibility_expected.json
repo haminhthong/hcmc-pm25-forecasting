@@ -1,0 +1,13 @@
+{
+  "data_sha256": "ed3c52b80ffecd1093b386cc5bc8d1a0359da790ce1b998f4c08950b6750babb",
+  "model_name": "extra_trees",
+  "metrics": {
+    "mae": 2.4130249999999926,
+    "rmse": 2.489983011549978,
+    "macro_f1": 0.2222222222222222,
+    "qwk": 0,
+    "high_pm25_mae": 2.853892857142848,
+    "high_pm25_recall": 0
+  },
+  "extra_trees_backtest_mae_mean": 2.0764847222222214
+}

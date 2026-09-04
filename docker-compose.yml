@@ -1,8 +1,18 @@
 services:
+  train:
+    build: .
+    command: ["python", "-m", "src.train", "--config", "configs/config.yaml"]
+    volumes:
+      - ./artifacts:/app/artifacts
+
   api:
     build: .
     ports:
       - "8000:8000"
+    depends_on:
+      train:
+        condition: service_completed_successfully
+
   dashboard:
     build: .
     command: ["streamlit", "run", "app/dashboard.py", "--server.address=0.0.0.0", "--server.port=8501"]

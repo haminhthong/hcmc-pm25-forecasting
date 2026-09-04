@@ -1,49 +1,112 @@
-"""Dashboard Streamlit minh họa kết quả dự báo theo trạm."""
+"""Dashboard Streamlit minh họa kết quả dự báo PM2.5 giờ tiếp theo."""
 
 import os
 
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
 from src.data import load_air_quality, load_config
 
 st.set_page_config(page_title="Dự báo PM2.5 TP.HCM", layout="wide")
-st.title("Dự báo PM2.5 giờ tiếp theo")
-st.caption("Bản trình diễn nghiên cứu, không dùng thay cho hệ thống cảnh báo chính thức.")
+st.title("Dự báo PM2.5 giờ tiếp theo (Next-Hour PM2.5 Forecasting)")
+st.caption(
+    "Dự án portfolio thử nghiệm. Các mức Thấp/Trung bình/Cao là nhóm phân tích nội bộ, "
+    "không phải chỉ số AQI chính thức hoặc khuyến nghị y tế."
+)
+
 config = load_config("configs/config.yaml")
 api_url = os.getenv("PM25_API_URL", "http://localhost:8000")
 data = load_air_quality(config)
 station_column = config["data"]["station_column"]
 timestamp_column = config["data"]["timestamp_column"]
 target = config["data"]["target_column"]
+
 station = st.selectbox("Trạm quan trắc", sorted(data[station_column].unique()))
-history = data[data[station_column] == station].sort_values(timestamp_column).tail(24)
+history = data[data[station_column] == station].sort_values(timestamp_column).tail(25)
 
-try:
-    payload_history = history.copy()
-    payload_history[timestamp_column] = payload_history[timestamp_column].astype(str)
-    payload_history = payload_history.astype(object).where(pd.notna(payload_history), None)
-    response = requests.post(
-        f"{api_url}/predict",
-        json={"observations": payload_history.to_dict("records")},
-        timeout=10,
-    )
-    response.raise_for_status()
-    result = response.json()
-    first, second, third = st.columns(3)
-    first.metric("PM2.5 hiện tại", f"{result['current_pm25']:.1f} µg/m³")
-    second.metric("Dự báo giờ tới", f"{result['predicted_pm25']:.1f} µg/m³")
-    third.metric("Mức", result["level"])
-    confidence = result.get("confidence")
-    confidence_text = "chưa xác định" if confidence is None else f"{confidence:.0%}"
-    st.caption(
-        f"Độ tin cậy tương đối: {confidence_text} · "
-        f"Cập nhật: {result['updated_at']}"
-    )
-except requests.RequestException:
-    st.warning("Không kết nối được API. Hãy chạy: uvicorn app.api:app --reload")
+if len(history) < 25:
+    st.error("Trạm được chọn không đủ 25 giờ quan trắc liên tục.")
+else:
+    try:
+        payload_history = history.copy()
+        payload_history[timestamp_column] = payload_history[timestamp_column].astype(str)
+        payload_history = payload_history.astype(object).where(pd.notna(payload_history), None)
+        response = requests.post(
+            f"{api_url}/predict",
+            json={"observations": payload_history.to_dict("records")},
+            timeout=10,
+        )
 
-figure = px.line(history, x=timestamp_column, y=target, markers=True, title="24 giờ gần nhất")
-st.plotly_chart(figure, use_container_width=True)
+        if response.status_code == 200:
+            result = response.json()
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("PM2.5 Hiện tại (Origin)", f"{result['current_pm25']:.1f} µg/m³")
+            c2.metric("Dự báo Giờ tới (Target)", f"{result['predicted_pm25']:.1f} µg/m³")
+            c3.metric("Mức phân tích", result["level"])
+
+            interval = result.get("interval", {})
+            interval_str = f"[{interval.get('lower', 0):.1f} - {interval.get('upper', 0):.1f}] µg/m³"
+            c4.metric("Khoảng dự báo (90% Conformal)", interval_str)
+
+            st.info(
+                f"**Mô hình:** `{result.get('model_version', '2026-09-01')}` · "
+                f"**Forecast Origin (t):** {result.get('forecast_origin')} · "
+                f"**Forecast For (t+1):** {result.get('forecast_for')}"
+            )
+
+            # Vẽ biểu đồ chuỗi thời gian lịch sử và mốc dự báo
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(
+                    x=history[timestamp_column],
+                    y=history[target],
+                    mode="lines+markers",
+                    name="Quan trắc lịch sử",
+                    line={"color": "#1f77b4"},
+                )
+            )
+
+            target_time = pd.to_datetime(result.get("forecast_for"))
+            pred_val = result["predicted_pm25"]
+            lower_val = interval.get("lower", pred_val)
+            upper_val = interval.get("upper", pred_val)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[target_time],
+                    y=[pred_val],
+                    mode="markers",
+                    name="Dự báo (t+1)",
+                    marker={"color": "#d62728", "size": 12, "symbol": "diamond"},
+                    error_y=dict(
+                        type="data",
+                        symmetric=False,
+                        array=[upper_val - pred_val],
+                        arrayminus=[pred_val - lower_val],
+                        color="#d62728",
+                        width=6,
+                    ),
+                )
+            )
+            fig.update_layout(
+                title=f"Chuỗi quan trắc và điểm dự báo tại {station}",
+                xaxis_title="Thời gian (Timestamp)",
+                yaxis_title="Nồng độ PM2.5 (µg/m³)",
+                template="plotly_white",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        elif response.status_code == 422:
+            st.error(f"Lỗi Schema Validation (422): {response.json().get('detail')}")
+        elif response.status_code == 400:
+            st.warning(f"Dữ liệu đầu vào không hợp lệ (400): {response.json().get('message')}")
+        elif response.status_code == 503:
+            st.warning("Mô hình hoặc dịch vụ API chưa sẵn sàng (503).")
+        else:
+            st.error(f"Lỗi API HTTP {response.status_code}")
+
+    except requests.RequestException:
+        st.warning("Không thể kết nối đến API server. Hãy đảm bảo API đang chạy tại http://localhost:8000")
+

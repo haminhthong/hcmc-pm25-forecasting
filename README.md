@@ -1,26 +1,65 @@
 # 🌫️ Leakage-Safe Next-Hour PM2.5 Forecasting for Ho Chi Minh City
 
-Dự án nghiên cứu & triển khai mô hình học máy **Dự báo nồng độ ô nhiễm PM2.5 trước 1 giờ (\(t+1\))** theo từng trạm quan trắc tại TP.HCM. Dự án được thiết kế chuẩn mực theo tiêu chí **Production-Grade Data Mining & MLOps**, tập trung vào tính **Leakage-Safe (Chống rò rỉ dữ liệu chuỗi thời gian)**, **Train-Serving Parity**, **Quality Gate tự động** và **Khả năng đóng gói thương mại**.
+Dự án portfolio mô phỏng vòng đời kỹ thuật của một hệ thống **Dự báo nồng độ PM2.5 giờ tiếp theo (\(t+1\))** theo từng trạm quan trắc tại TP.HCM. Dự án tập trung vào kiểm tra dữ liệu, feature engineering theo timestamp, expanding-window validation, baseline comparison, Quality Gate tự động, Split Conformal prediction intervals, API, dashboard, Docker và CI.
 
-> ⚠️ **Lưu ý phạm vi:** Mô hình phục vụ mục đích nghiên cứu, học thuật và trình diễn kỹ thuật Machine Learning Engineering. Không sử dụng làm hệ thống cảnh báo sức khỏe công cộng chính thức khi chưa được kiểm định độc lập trên dữ liệu thực tế lớn.
+> ⚠️ **Tuyên bố miễn trừ:** Các mức Thấp/Trung bình/Cao trong dự án là nhóm phân tích nội bộ thử nghiệm, không phải chỉ số AQI chính thức hoặc khuyến nghị y tế.
+
+---
+
+## 🎯 Định Nghĩa Bài Toán (Problem Definition)
+
+Tại thời điểm $t$, sử dụng dữ liệu quan trắc đã biết đến hết thời điểm $t$ của một trạm duy nhất để dự báo nồng độ PM2.5 tại mốc $t+1$ giờ.
+
+### Đầu vào hợp lệ (Valid Input Constraints):
+- **Một trạm duy nhất** per request.
+- **Timestamp tăng dần**, liên tục từng giờ ($\Delta t = 1\text{h}$).
+- **Không trùng mốc timestamp**.
+- **PM2.5 hiện tại phải tồn tại** và không âm ($\ge 0$).
+- **Tối thiểu 25 giờ lịch sử liên tục** (khi sử dụng lag 24 giờ).
+- Các chất ngoại sinh ($O_3$, $SO_2$, $NO_2$, $CO$, $TSP$, nhiệt độ, độ ẩm) có thể thiếu.
+
+### Cấu trúc Output chuẩn hóa (Standard Output Schema):
+```json
+{
+  "station": "Trạm A",
+  "forecast_origin": "2024-01-01T10:00:00",
+  "forecast_for": "2024-01-01T11:00:00",
+  "current_pm25": 32.1,
+  "predicted_pm25": 34.7,
+  "level": "Trung bình",
+  "interval": {
+    "lower": 29.2,
+    "upper": 40.1,
+    "coverage": 0.9
+  },
+  "model_version": "2026-09-01-001",
+  "updated_at": "2024-01-01T10:00:05Z"
+}
+```
+
+- `forecast_origin`: Mốc thời điểm hiện tại $t$ của dữ liệu quan trắc.
+- `forecast_for`: Mốc thời điểm $t+1$ được dự báo.
+- `updated_at`: Thời điểm API trả kết quả phản hồi.
 
 ---
 
 ## 🌟 Điểm Nổi Bật Kỹ Thuật (Key Technical Highlights)
 
-- 🔒 **Chống Leakage Dữ Liệu Thời Gian Tuyệt Đối**:
-  - Tra cứu lag (1, 2, 3, 6, 12, 24 giờ) và rolling features (3, 6, 24 giờ) theo mốc thời gian thực (`timestamp` thực tế), **không dịch chuyển theo vị trí dòng**. Tránh rò rỉ khi chuỗi dữ liệu có khoảng khuyết (gaps).
-  - Phân chia Train/Validation/Test theo mốc thời gian duy nhất (`timestamp`), đảm bảo tất cả trạm quan trắc tại cùng một giờ luôn nằm chung một partition.
-- 📐 **Train-Serving Parity với Scikit-Learn Pipeline**:
-  - Đóng gói toàn bộ Preprocessing (`SimpleImputer`, `OneHotEncoder`) và Model Regressor trong cùng 1 `Pipeline`, loại bỏ hoàn toàn sự lệch lệch giữa môi trường huấn luyện và suy luận thực tế (inference).
-- 🏆 **Expanding-Window Backtesting & Quality Gate Tự Động**:
-  - Chọn mô hình ứng viên (Random Forest, Extra Trees, HistGradientBoosting) dựa trên trung bình MAE qua expanding time-series folds ở tập train.
-  - So sánh trực tiếp với 2 baseline bắt buộc: **Persistence** (\(t+1 = t\)) và **Seasonal Naive 24h** (\(t+1 = t-23h\)).
-  - Quality Gate tự động gắn nhãn `không đạt` nếu mô hình champion không vượt qua Persistence trên tập Test độc lập.
-- 🚀 **Kiến Trúc MLOps Hoàn Chỉnh**:
-  - **REST API**: Khởi tạo bằng FastAPI với Pydantic schema validation và LRU Caching cho Predictor.
-  - **Dashboard Trực Quan**: Xây dựng bằng Streamlit & Plotly hiển thị dự báo, mức độ ô nhiễm (Tốt/Trung bình/Xấu) và độ tin cậy tương đối.
-  - **Containerization & CI/CD**: Hỗ trợ Docker, Docker Compose, kiểm thử tự động với `pytest` và linting với `ruff`.
+- 🔒 **Chống Leakage Dữ Liệu Biên Target & Partition**:
+  - Tra cứu lag (1, 2, 3, 6, 12, 24 giờ) và rolling features theo mốc thời gian thực (`timestamp`), không dịch vị trí dòng.
+  - Sửa leakage tại biên split: Mốc `target_timestamp` ($t+1\text{h}$) của dữ liệu train **luôn nhỏ hơn** mốc bắt đầu của tập validation/test (`target_timestamp < test_start`).
+- 📊 **Phân Biệt Mục Tiêu Hồi Quy & Diễn Giải**:
+  - Mục tiêu chính là bài toán hồi quy nồng độ PM2.5. Phân lớp nhãn Thấp/Trung bình/Cao chỉ là bước diễn giải phụ.
+- 📐 **Split Conformal Prediction Interval**:
+  - Thay thế chỉ số tự tạo (tree confidence heuristic) bằng khoảng dự báo chuẩn mực **Split Conformal Prediction** ($\text{coverage} = 0.90$) tính từ residual quantile 90% ở tập validation.
+- 🏆 **Quality Gate & Baseline Persistence Rule**:
+  - So sánh trực tiếp với 2 baseline: **Persistence** ($t+1 = t$) và **Seasonal Naive 24h** ($t+1 = t-23h$).
+  - Quality Gate tự động đánh giá: $MAE_{\text{model}} \le MAE_{\text{persistence}} \times 0.95$, Recall nhóm PM2.5 cao $\ge 0.75$, và Rolling MAE Std $\le 1.0$.
+  - Nếu mô hình học máy không vượt được baseline, hệ thống tự động gắn cờ fallback chọn persistence làm champion phục vụ suy luận.
+- 🚀 **Kiến Trúc Software Engineering & MLOps**:
+  - **FastAPI**: Pydantic input validation (tối thiểu 25, tối đa 168 observations), phân loại status code (400, 422, 503, 500) và `/health` check.
+  - **Streamlit Dashboard**: Hiển thị chuỗi 24h, mốc dự báo $t+1$, khoảng tin cậy 90% Conformal và cảnh báo chất lượng dữ liệu.
+  - **Docker & Lockfiles**: Tách biệt bước huấn luyện khỏi container serving, cài đặt từ dependencies đã khóa (`requirements.lock`).
 
 ---
 
@@ -62,6 +101,14 @@ flowchart TD
 ---
 
 ## 🛠️ Hướng Dẫn Cài Đặt & Chạy (Quick Start)
+
+### Chạy và tái lập kết quả trên Google Colab
+
+[![Mở bằng Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/haminhthong/hcmc-pm25-forecasting/blob/main/notebooks/02_colab_reproducibility.ipynb)
+
+Notebook Colab tự clone repository, cài các phiên bản thư viện đã khóa trong `requirements-colab.txt`, chạy trực tiếp pipeline `src.train` và đối chiếu kết quả với snapshot chuẩn. Cách này bảo đảm notebook và CLI không duy trì hai bản logic huấn luyện khác nhau.
+
+Khi repository chưa được đẩy lên GitHub, có thể mở notebook cục bộ bằng Jupyter; notebook sẽ tự tìm thư mục gốc chứa `pyproject.toml`.
 
 ### 1. Khởi tạo môi trường Python (Python 3.11+)
 
@@ -170,7 +217,8 @@ docker compose up --build
 │   │   └── air_quality_sample.csv # Dữ liệu tổng hợp thử nghiệm kỹ thuật
 │   └── README.md                 # Data Card & hướng dẫn giấy phép dữ liệu
 ├── notebooks/
-│   └── 01_experiment.ipynb       # Notebook phân tích khám phá & giải thích thí nghiệm
+│   ├── 01_experiment.ipynb       # Notebook phân tích khám phá & giải thích thí nghiệm
+│   └── 02_colab_reproducibility.ipynb # Notebook Colab tái lập kết quả CLI
 ├── src/                          # Mã nguồn cốt lõi (Module hóa sạch)
 │   ├── data.py                   # Data audit, config loading & schema validation
 │   ├── features.py               # Time-aware feature engineering (Chống leakage)

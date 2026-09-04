@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,7 +9,9 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from src.evaluate import classify_pm25
+import json
+
+from src.evaluate import classify_pm25, get_threshold_params
 from src.features import build_features, model_feature_columns
 
 
@@ -21,18 +22,33 @@ class Predictor:
         self.config = config
         artifact_dir = Path(config["artifacts"]["directory"])
         self.model = joblib.load(artifact_dir / config["artifacts"]["model_file"])
-        metadata_path = artifact_dir / config["artifacts"]["metadata_file"]
-        self.metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata_path = artifact_dir / config["artifacts"].get("metadata_file", "metadata.json")
+        if metadata_path.exists():
+            with metadata_path.open(encoding="utf-8") as f:
+                self.metadata = json.load(f)
+        else:
+            self.metadata = {}
 
     def predict(self, observations: pd.DataFrame) -> dict:
         """Dự báo giờ kế tiếp từ chuỗi quan trắc của một trạm."""
         station_column = self.config["data"]["station_column"]
         timestamp_column = self.config["data"]["timestamp_column"]
+        target_column = self.config["data"]["target_column"]
+
         observations = observations.copy()
         if observations.empty:
             raise ValueError("Cần ít nhất một quan trắc để dự báo.")
         if observations[station_column].nunique(dropna=False) != 1:
-            raise ValueError("Mỗi request chỉ được chứa dữ liệu của một trạm.")
+            raise ValueError("Mỗi request chỉ được chứa dữ liệu của một trạm duy nhất.")
+
+        lags = self.config["features"].get("lags", [24])
+        windows = self.config["features"].get("rolling_windows", [24])
+        required_history_hours = max(max(lags), max(windows))
+
+        if len(observations) < required_history_hours + 1:
+            raise ValueError(
+                f"Cần tối thiểu {required_history_hours + 1} quan trắc để dự báo."
+            )
 
         observations[timestamp_column] = pd.to_datetime(
             observations[timestamp_column],
@@ -42,30 +58,49 @@ class Predictor:
             raise ValueError("Request chứa timestamp không hợp lệ.")
         if observations.duplicated([station_column, timestamp_column]).any():
             raise ValueError("Request chứa timestamp trùng lặp trong cùng trạm.")
-        featured = build_features(observations, self.config, include_target=False)
+
+        ordered = observations.sort_values(timestamp_column)
+        gaps = ordered[timestamp_column].diff().dropna()
+        if (gaps != pd.to_timedelta(1, unit="h")).any():
+            raise ValueError("Chuỗi quan trắc phải liên tục theo từng giờ.")
+
+        if (ordered[target_column] < 0).any():
+            raise ValueError("Nồng độ PM2.5 không được âm.")
+
+        featured = build_features(ordered, self.config, include_target=False)
         latest = featured.sort_values(timestamp_column).iloc[[-1]]
         columns = [*model_feature_columns(self.config), station_column]
         model_input = latest.reindex(columns=columns)
-        value = max(0.0, float(self.model.predict(model_input)[0]))
+
+        serving_champion = self.metadata.get("serving_champion")
+        if serving_champion == "persistence":
+            value = max(0.0, float(latest[target_column].iloc[0]))
+        else:
+            value = max(0.0, float(self.model.predict(model_input)[0]))
+
         thresholds = self.config["thresholds"]
-        tree_predictions = []
-        try:
-            transformed = self.model.named_steps["preprocess"].transform(model_input)
-            estimators = self.model.named_steps["model"].estimators_
-            tree_predictions = [tree.predict(transformed)[0] for tree in estimators]
-        except (AttributeError, KeyError):
-            pass
-        uncertainty = float(np.std(tree_predictions)) if tree_predictions else None
-        confidence = (
-            None
-            if uncertainty is None
-            else float(np.clip(1 - uncertainty / max(value, 1), 0, 1))
-        )
+        low_max, medium_max, labels = get_threshold_params(thresholds)
+
+        interval_info = self.metadata.get("prediction_interval", {})
+        q90 = float(interval_info.get("residual_quantile", 5.0))
+        lower = max(0.0, float(value - q90))
+        upper = float(value + q90)
+
+        origin_dt = latest[timestamp_column].iloc[0]
+        target_dt = origin_dt + pd.to_timedelta(1, unit="h")
+
         return {
             "station": str(latest[station_column].iloc[0]),
-            "current_pm25": float(latest[self.config["data"]["target_column"]].iloc[0]),
+            "forecast_origin": origin_dt.isoformat(),
+            "forecast_for": target_dt.isoformat(),
+            "current_pm25": float(latest[target_column].iloc[0]),
             "predicted_pm25": round(value, 3),
-            "level": str(classify_pm25([value], thresholds["good_max"], thresholds["moderate_max"])[0]),
-            "confidence": None if confidence is None else round(confidence, 3),
+            "level": str(classify_pm25([value], low_max, medium_max, labels)[0]),
+            "interval": {
+                "lower": round(lower, 2),
+                "upper": round(upper, 2),
+                "coverage": 0.9,
+            },
+            "model_version": self.metadata.get("model_version", "2026-09-01"),
             "updated_at": datetime.now(UTC).isoformat(),
         }

@@ -1,0 +1,6 @@
+# Môi trường khóa phiên bản để tái lập kết quả trên Google Colab.
+numpy==2.1.3
+pandas==2.2.3
+scikit-learn==1.5.2
+PyYAML==6.0.3
+joblib==1.4.2

@@ -13,24 +13,38 @@ from sklearn.metrics import (
     mean_squared_error,
 )
 
-VALID_LABELS = ("Tốt", "Trung bình", "Xấu")
+VALID_LABELS = ("Thấp", "Trung bình", "Cao")
 
 
-def classify_pm25(values, good_max: float, moderate_max: float):
-    """Chuyển nồng độ PM2.5 thành ba mức chất lượng được cấu hình."""
+def get_threshold_params(thresholds: dict) -> tuple[float, float, list[str]]:
+    """Trích xuất ngưỡng và nhãn từ cấu hình thresholds."""
+    low_max = float(thresholds.get("low_max", thresholds.get("good_max", 12.0)))
+    medium_max = float(thresholds.get("medium_max", thresholds.get("moderate_max", 35.5)))
+    labels = list(thresholds.get("labels", VALID_LABELS))
+    return low_max, medium_max, labels
+
+
+def classify_pm25(values, low_max: float = 12.0, medium_max: float = 35.5, labels: list[str] | tuple[str, ...] = VALID_LABELS):
+    """Chuyển nồng độ PM2.5 thành ba mức phân tích nội bộ (Thấp, Trung bình, Cao)."""
     array = np.asarray(values, dtype=float)
-    return np.select([array <= good_max, array < moderate_max], VALID_LABELS[:2], default=VALID_LABELS[2])
+    label_list = list(labels)
+    return np.select([array <= low_max, array < medium_max], label_list[:2], default=label_list[2])
 
 
 def regression_and_classification_metrics(
     y_true,
     y_pred,
-    thresholds: dict[str, float],
+    thresholds: dict,
 ) -> dict:
-    """Tính đồng thời metric hồi quy, phân lớp và nhóm PM2.5 cao."""
-    true_labels = classify_pm25(y_true, thresholds["good_max"], thresholds["moderate_max"])
-    predicted_labels = classify_pm25(y_pred, thresholds["good_max"], thresholds["moderate_max"])
-    high_mask = np.asarray(y_true, dtype=float) >= thresholds["moderate_max"]
+    """Tính đồng thời metric hồi quy (MAE, RMSE, Bias, P90 AE), phân lớp và nhóm PM2.5 cao."""
+    y_true_arr = np.asarray(y_true, dtype=float)
+    y_pred_arr = np.asarray(y_pred, dtype=float)
+    low_max, medium_max, labels = get_threshold_params(thresholds)
+
+    true_labels = classify_pm25(y_true_arr, low_max, medium_max, labels)
+    predicted_labels = classify_pm25(y_pred_arr, low_max, medium_max, labels)
+    high_mask = y_true_arr >= medium_max
+
     if len(set(true_labels) | set(predicted_labels)) < 2:
         qwk = None
     else:
@@ -38,40 +52,44 @@ def regression_and_classification_metrics(
             cohen_kappa_score(
                 true_labels,
                 predicted_labels,
-                labels=VALID_LABELS,
+                labels=labels,
                 weights="quadratic",
             )
         )
         qwk = qwk_value if np.isfinite(qwk_value) else None
+
+    abs_errors = np.abs(y_true_arr - y_pred_arr)
+    report = classification_report(
+        true_labels, predicted_labels, labels=labels, output_dict=True, zero_division=0
+    )
+
+    high_label = labels[2] if len(labels) > 2 else "Cao"
+    high_recall = float(report[high_label]["recall"]) if high_label in report else 0.0
+
     result = {
-        "mae": float(mean_absolute_error(y_true, y_pred)),
-        "rmse": float(mean_squared_error(y_true, y_pred) ** 0.5),
+        "mae": float(mean_absolute_error(y_true_arr, y_pred_arr)),
+        "rmse": float(mean_squared_error(y_true_arr, y_pred_arr) ** 0.5),
+        "bias": float(np.mean(y_pred_arr - y_true_arr)),
+        "p90_absolute_error": float(np.quantile(abs_errors, 0.9)),
         "macro_f1": float(
             f1_score(
                 true_labels,
                 predicted_labels,
-                labels=VALID_LABELS,
+                labels=labels,
                 average="macro",
                 zero_division=0,
             )
         ),
         "qwk": qwk,
-        "confusion_matrix": confusion_matrix(true_labels, predicted_labels, labels=VALID_LABELS).tolist(),
-        "classification_report": classification_report(
-            true_labels, predicted_labels, labels=VALID_LABELS, output_dict=True, zero_division=0
-        ),
+        "confusion_matrix": confusion_matrix(true_labels, predicted_labels, labels=labels).tolist(),
+        "classification_report": report,
     }
     result["high_pm25_mae"] = (
-        float(
-            mean_absolute_error(
-                np.asarray(y_true)[high_mask],
-                np.asarray(y_pred)[high_mask],
-            )
-        )
+        float(mean_absolute_error(y_true_arr[high_mask], y_pred_arr[high_mask]))
         if high_mask.any()
         else None
     )
-    result["high_pm25_recall"] = float(result["classification_report"]["Xấu"]["recall"])
+    result["high_pm25_recall"] = high_recall
     return result
 
 

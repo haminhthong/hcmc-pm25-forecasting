@@ -61,7 +61,7 @@ def expanding_time_folds(
     folds: int,
     minimum_train_periods: int,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Sinh expanding folds mà không tách các trạm tại cùng một thời điểm."""
+    """Sinh expanding folds mà không làm rò rỉ target_timestamp sang validation."""
     periods = np.sort(frame[timestamp_column].unique())
     validation_periods = periods[minimum_train_periods:]
     if len(validation_periods) < folds:
@@ -71,7 +71,10 @@ def expanding_time_folds(
     for period_group in np.array_split(validation_periods, folds):
         validation_start = period_group[0]
         validation_end = period_group[-1]
-        train_mask = frame[timestamp_column] < validation_start
+        if "target_timestamp" in frame.columns:
+            train_mask = frame["target_timestamp"] < validation_start
+        else:
+            train_mask = frame[timestamp_column] < validation_start
         validation_mask = frame[timestamp_column].between(validation_start, validation_end)
         result.append((np.flatnonzero(train_mask), np.flatnonzero(validation_mask)))
     return result
@@ -82,13 +85,16 @@ def split_by_time(
     test_fraction: float,
     timestamp_column: str = "timestamp",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Chia theo mốc thời gian để mọi trạm cùng giờ nằm chung một phía."""
+    """Chia theo mốc thời gian sao cho target_timestamp của train nhỏ hơn mốc test_start."""
     periods = np.sort(frame[timestamp_column].unique())
     test_period_count = max(1, int(np.ceil(len(periods) * test_fraction)))
     if test_period_count >= len(periods):
         raise ValueError("Dữ liệu quá ít để tạo tập kiểm thử cuối theo thời gian.")
     test_start = periods[-test_period_count]
-    train_frame = frame[frame[timestamp_column] < test_start].copy()
+    if "target_timestamp" in frame.columns:
+        train_frame = frame[frame["target_timestamp"] < test_start].copy()
+    else:
+        train_frame = frame[frame[timestamp_column] < test_start].copy()
     test_frame = frame[frame[timestamp_column] >= test_start].copy()
     return train_frame, test_frame
 
@@ -99,8 +105,9 @@ def evaluate_candidate(
     config: dict,
     columns: list[str],
 ) -> dict:
-    """Đánh giá một model trên toàn bộ expanding-window folds."""
+    """Đánh giá một model trên toàn bộ expanding-window folds và thu thập validation residuals."""
     fold_metrics = []
+    validation_residuals = []
     split = config["split"]
     timestamp = config["data"]["timestamp_column"]
     for train_indices, validation_indices in expanding_time_folds(
@@ -114,6 +121,8 @@ def evaluate_candidate(
         validation_fold = train_frame.iloc[validation_indices]
         pipeline.fit(train_fold[columns], train_fold["target_next_hour"])
         prediction = pipeline.predict(validation_fold[columns])
+        abs_err = np.abs(validation_fold["target_next_hour"].to_numpy() - prediction)
+        validation_residuals.extend(abs_err)
         fold_metrics.append(
             regression_and_classification_metrics(
                 validation_fold["target_next_hour"],
@@ -123,11 +132,13 @@ def evaluate_candidate(
         )
     if not fold_metrics:
         raise ValueError("Dữ liệu quá ít cho rolling backtest với cấu hình hiện tại.")
+    residual_q90 = float(np.quantile(validation_residuals, 0.9)) if validation_residuals else 5.0
     return {
         "folds": fold_metrics,
         "mae_mean": float(np.mean([item["mae"] for item in fold_metrics])),
         "mae_std": float(np.std([item["mae"] for item in fold_metrics])),
         "rmse_mean": float(np.mean([item["rmse"] for item in fold_metrics])),
+        "residual_quantile_90": residual_q90,
     }
 
 
@@ -152,18 +163,48 @@ def evaluate_baselines(
     }
 
 
-def build_quality_gate(champion_mae: float, persistence_mae: float) -> dict:
-    """Xác định model có thắng baseline persistence hay không."""
+def build_quality_gate(
+    champion_metrics: dict,
+    persistence_metrics: dict,
+    champion_mae_std: float,
+    config: dict,
+) -> dict:
+    """Đánh giá Quality Gate đa tiêu chí:
+    1. MAE_model <= MAE_persistence * (1 - min_improvement)
+    2. High PM2.5 recall >= min_recall
+    3. Rolling MAE std <= max_std
+    """
+    qg_cfg = config.get("quality_gate", {})
+    min_improvement = qg_cfg.get("minimum_mae_improvement", 0.05)
+    min_high_recall = qg_cfg.get("minimum_high_pm25_recall", 0.75)
+    max_mae_std = qg_cfg.get("maximum_rolling_mae_std", 1.0)
+
+    champion_mae = champion_metrics["mae"]
+    persistence_mae = persistence_metrics["mae"]
+    high_recall = champion_metrics.get("high_pm25_recall", 0.0)
+
     improvement = (
         (persistence_mae - champion_mae) / persistence_mae
-        if persistence_mae
-        else None
+        if persistence_mae > 0
+        else 0.0
     )
-    passes_baseline = champion_mae < persistence_mae
+
+    passes_mae = champion_mae <= persistence_mae * (1.0 - min_improvement)
+    passes_recall = high_recall >= min_high_recall
+    passes_std = champion_mae_std <= max_mae_std
+
+    passes_all = passes_mae and passes_recall and passes_std
     return {
-        "passes_baseline": passes_baseline,
-        "mae_improvement_vs_persistence": improvement,
-        "status": "đạt" if passes_baseline else "không đạt",
+        "passes_baseline": bool(passes_all),
+        "mae_improvement_vs_persistence": float(improvement),
+        "high_pm25_recall": float(high_recall),
+        "rolling_mae_std": float(champion_mae_std),
+        "checks": {
+            "mae_improvement_ge_5pct": bool(passes_mae),
+            "high_recall_ge_75pct": bool(passes_recall),
+            "rolling_mae_std_le_1": bool(passes_std),
+        },
+        "status": "đạt" if passes_all else "không đạt",
     }
 
 
@@ -172,7 +213,7 @@ def save_artifacts(
     metadata: dict,
     evaluation: dict,
     config: dict,
-) -> tuple[Path, Path]:
+) -> None:
     """Lưu model, metadata và báo cáo đánh giá bằng định dạng tái lập."""
     artifact_dir = Path(config["artifacts"]["directory"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -189,11 +230,12 @@ def save_artifacts(
         json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False),
         encoding="utf-8",
     )
-    return model_path, evaluation_path
 
 
 def train(config_path: str, persist_artifacts: bool = True) -> dict:
     """Chạy pipeline huấn luyện đầy đủ và tùy chọn lưu artifact."""
+    import sklearn
+
     config = load_config(config_path)
     raw = load_air_quality(config)
     timestamp = config["data"]["timestamp_column"]
@@ -219,8 +261,8 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
         name: evaluate_candidate(name, train_frame, config, columns)
         for name in candidates
     }
-    champion = min(backtest, key=lambda name: backtest[name]["mae_mean"])
-    pipeline, columns = make_pipeline(config, champion)
+    candidate_champion = min(backtest, key=lambda name: backtest[name]["mae_mean"])
+    pipeline, columns = make_pipeline(config, candidate_champion)
     pipeline.fit(train_frame[columns], train_frame["target_next_hour"])
     prediction = pipeline.predict(test_frame[columns])
     baselines = evaluate_baselines(test_frame, target, config["thresholds"])
@@ -230,9 +272,19 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
         config["thresholds"],
     )
     quality_gate = build_quality_gate(
-        metrics["mae"],
-        baselines["persistence"]["mae"],
+        metrics,
+        baselines["persistence"],
+        backtest[candidate_champion]["mae_std"],
+        config,
     )
+
+    # Nếu model không vượt baseline persistence, champion serving sẽ được gắn cờ fallback
+    champion_name = candidate_champion
+    if not quality_gate["passes_baseline"]:
+        champion_name = "persistence"
+
+    residual_quantile = backtest[candidate_champion]["residual_quantile_90"]
+
     artifact_dir = Path(config["artifacts"]["directory"])
     model_path = artifact_dir / config["artifacts"]["model_file"]
     evaluation = {
@@ -250,16 +302,25 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
     }
     evaluation_path = artifact_dir / config["artifacts"]["evaluation_file"]
     metadata = {
+        "model_version": "2026-09-01-001",
         "created_at": datetime.now(UTC).isoformat(),
-        "model_name": champion,
+        "model_name": candidate_champion,
+        "serving_champion": champion_name,
         "selection_rule": "MAE trung bình thấp nhất trên expanding-window backtest của tập train",
         "random_state": config["project"]["random_state"],
         "data_sha256": sha256_file(resolve_data_path(config["data"]["path"])),
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "sklearn_version": sklearn.__version__,
         "features": columns,
         "train_period": [str(train_frame[timestamp].min()), str(train_frame[timestamp].max())],
         "test_period": [str(test_frame[timestamp].min()), str(test_frame[timestamp].max())],
         "metrics": metrics,
         "quality_gate": quality_gate,
+        "prediction_interval": {
+            "method": "split_conformal",
+            "coverage": 0.9,
+            "residual_quantile": round(residual_quantile, 4),
+        },
         "thresholds": config["thresholds"],
         "model_path": str(model_path),
         "evaluation_path": str(evaluation_path),

@@ -92,6 +92,7 @@ def build_features(frame: pd.DataFrame, config: dict[str, Any], include_target: 
     )
     result = add_time_features(result, timestamp)
     if include_target:
+        result["target_timestamp"] = result[timestamp] + pd.to_timedelta(1, unit="h")
         result["target_next_hour"] = lookup_pm25_at_offset(
             result,
             station,

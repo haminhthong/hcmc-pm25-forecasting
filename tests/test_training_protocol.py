@@ -35,7 +35,8 @@ def test_time_split_preserves_order():
 
 
 def test_quality_gate_requires_model_to_beat_persistence():
-    passed = build_quality_gate(champion_mae=1.0, persistence_mae=2.0)
-    failed = build_quality_gate(champion_mae=3.0, persistence_mae=2.0)
+    cfg = {"quality_gate": {"minimum_mae_improvement": 0.05, "minimum_high_pm25_recall": 0.75, "maximum_rolling_mae_std": 1.0}}
+    passed = build_quality_gate({"mae": 1.0, "high_pm25_recall": 0.8}, {"mae": 2.0}, 0.5, cfg)
+    failed = build_quality_gate({"mae": 1.98, "high_pm25_recall": 0.6}, {"mae": 2.0}, 0.5, cfg)
     assert passed["passes_baseline"] is True
     assert failed["passes_baseline"] is False
