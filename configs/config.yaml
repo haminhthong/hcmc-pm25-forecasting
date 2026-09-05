@@ -11,6 +11,8 @@ data:
 features:
   lags: [1, 2, 3, 6, 12, 24]
   rolling_windows: [3, 6, 24]
+  delta_lags: [1, 3]
+  include_rolling_std: true
   exogenous_columns: [TSP, NO2, SO2, CO, O3, temperature, humidity]
 split:
   test_fraction: 0.1
@@ -25,7 +27,7 @@ model:
     min_samples_leaf: 2
     n_jobs: -1
 model_comparison:
-  candidates: [random_forest, extra_trees, hist_gradient_boosting]
+  candidates: [ridge, random_forest, extra_trees, hist_gradient_boosting]
 thresholds:
   source: experimental
   low_max: 12.0
@@ -40,7 +42,10 @@ artifacts:
   model_file: model.joblib
   metadata_file: metadata.json
   evaluation_file: evaluation.json
+  feature_schema_file: feature_schema.json
+  config_snapshot_file: config_snapshot.yaml
 mlflow:
   enabled: false
   tracking_uri: mlruns
   experiment_name: hcmc-pm25-next-hour
+

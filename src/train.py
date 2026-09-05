@@ -11,32 +11,64 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+import yaml
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from src.data import audit_air_quality, load_air_quality, load_config, resolve_data_path
 from src.evaluate import (
+    compute_mase,
+    compute_skill_score,
+    conformal_interval_metrics,
     metrics_by_station,
     persistence_predictions,
     regression_and_classification_metrics,
     seasonal_naive_predictions,
+    sliced_error_analysis,
 )
 from src.features import build_features, model_feature_columns
 from src.models import build_model
 from src.utils import sha256_file
 
 
+def generate_model_version(data_path: Path) -> str:
+    """Sinh mã phiên bản tự động từ ngày, git commit SHA (nếu có) và data SHA-256."""
+    date_str = datetime.now(UTC).strftime("%Y%m%d")
+    git_sha = "local"
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            git_sha = result.stdout.strip()
+    except Exception:
+        pass
+    data_hash = sha256_file(data_path)[:7]
+    return f"pm25-{date_str}-{git_sha}-{data_hash}"
+
+
 def make_pipeline(config: dict, model_name: str) -> tuple[Pipeline, list[str]]:
     """Tạo preprocessing và model trong cùng một sklearn Pipeline."""
     station = config["data"]["station_column"]
     numeric = model_feature_columns(config)
+    numeric_pipeline = Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
+            ("scaler", StandardScaler()),
+        ]
+    )
     preprocessor = ColumnTransformer(
         [
             (
                 "numeric",
-                SimpleImputer(strategy="median", keep_empty_features=True),
+                numeric_pipeline,
                 numeric,
             ),
             (
@@ -49,6 +81,7 @@ def make_pipeline(config: dict, model_name: str) -> tuple[Pipeline, list[str]]:
     params = config["model"].get("params", {}) if model_name == config["model"]["name"] else {}
     model = build_model(model_name, config["project"]["random_state"], params)
     return Pipeline([("preprocess", preprocessor), ("model", model)]), [*numeric, station]
+
 
 
 def expanding_time_folds(
@@ -227,12 +260,16 @@ def save_artifacts(
     evaluation: dict,
     config: dict,
 ) -> None:
-    """Lưu model, metadata và báo cáo đánh giá bằng định dạng tái lập."""
+    """Lưu model, metadata, schema, snapshot cấu hình và báo cáo đánh giá."""
     artifact_dir = Path(config["artifacts"]["directory"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
     model_path = artifact_dir / config["artifacts"]["model_file"]
     evaluation_path = artifact_dir / config["artifacts"]["evaluation_file"]
     metadata_path = artifact_dir / config["artifacts"]["metadata_file"]
+    schema_file = config["artifacts"].get("feature_schema_file", "feature_schema.json")
+    schema_path = artifact_dir / schema_file
+    config_snapshot_file = config["artifacts"].get("config_snapshot_file", "config_snapshot.yaml")
+    config_snapshot_path = artifact_dir / config_snapshot_file
 
     joblib.dump(pipeline, model_path)
     evaluation_path.write_text(
@@ -244,12 +281,27 @@ def save_artifacts(
         encoding="utf-8",
     )
 
+    feature_schema = {
+        "target_column": config["data"]["target_column"],
+        "station_column": config["data"]["station_column"],
+        "timestamp_column": config["data"]["timestamp_column"],
+        "model_feature_columns": metadata.get("features", []),
+        "feature_count": len(metadata.get("features", [])),
+    }
+    schema_path.write_text(
+        json.dumps(feature_schema, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    with config_snapshot_path.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(config, file, allow_unicode=True)
+
 
 def train(config_path: str, persist_artifacts: bool = True) -> dict:
     """Chạy pipeline huấn luyện đầy đủ và tùy chọn lưu artifact."""
     import sklearn
 
     config = load_config(config_path)
+    data_path = resolve_data_path(config["data"]["path"])
     raw = load_air_quality(config)
     timestamp = config["data"]["timestamp_column"]
     station = config["data"]["station_column"]
@@ -322,25 +374,97 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
         config,
     )
 
-    prediction = pipeline.predict(test_frame[columns])
-    baselines = evaluate_baselines(test_frame, target, config["thresholds"])
-    test_metrics = regression_and_classification_metrics(
+    # Đánh giá trên tập test cuối
+    candidate_ml_pred = pipeline.predict(test_frame[columns])
+    pers_test_pred = persistence_predictions(test_frame, target)
+    seasonal_test_pred = seasonal_naive_predictions(test_frame, target)
+
+    candidate_ml_test = regression_and_classification_metrics(
         test_frame["target_next_hour"],
-        prediction,
+        candidate_ml_pred,
+        config["thresholds"],
+    )
+    persistence_test = regression_and_classification_metrics(
+        test_frame["target_next_hour"],
+        pers_test_pred,
+        config["thresholds"],
+    )
+    seasonal_naive_test = regression_and_classification_metrics(
+        test_frame["target_next_hour"],
+        seasonal_test_pred,
         config["thresholds"],
     )
 
+    # Bổ sung MASE và MAE Skill Score so với Persistence Baseline
+    candidate_ml_test["mase"] = compute_mase(
+        test_frame["target_next_hour"], candidate_ml_pred, pers_test_pred
+    )
+    candidate_ml_test["skill_score_vs_persistence"] = compute_skill_score(
+        test_frame["target_next_hour"], candidate_ml_pred, pers_test_pred
+    )
+    persistence_test["mase"] = 1.0
+    persistence_test["skill_score_vs_persistence"] = 0.0
+    seasonal_naive_test["mase"] = compute_mase(
+        test_frame["target_next_hour"], seasonal_test_pred, pers_test_pred
+    )
+    seasonal_naive_test["skill_score_vs_persistence"] = compute_skill_score(
+        test_frame["target_next_hour"], seasonal_test_pred, pers_test_pred
+    )
+
+    # Quyết định chính thức phục vụ suy luận (Serving Champion)
     champion_name = candidate_champion
+    forecast_strategy = "ml_model"
     serving_residual_q90 = ml_residual_q90
     if not quality_gate["passes_baseline"]:
         champion_name = "persistence"
+        forecast_strategy = "persistence_fallback"
         serving_residual_q90 = pers_residual_q90
+
+    # Lấy đúng test metrics của serving champion (Sửa lỗi P0)
+    if champion_name == "persistence":
+        serving_champion_pred = pers_test_pred
+        serving_champion_test = persistence_test.copy()
+    else:
+        serving_champion_pred = candidate_ml_pred
+        serving_champion_test = candidate_ml_test.copy()
+
+    # Tính toán độ phủ và độ rộng thực tế của Conformal Prediction Interval trên tập test
+    test_lower = np.maximum(0.0, serving_champion_pred - serving_residual_q90)
+    test_upper = serving_champion_pred + serving_residual_q90
+    conformal_test_metrics = conformal_interval_metrics(
+        test_frame["target_next_hour"], test_lower, test_upper
+    )
+    serving_champion_test["conformal_interval"] = conformal_test_metrics
+
+    # Đánh giá theo từng trạm
+    station_metrics = metrics_by_station(
+        test_frame,
+        serving_champion_pred,
+        station,
+        config["thresholds"],
+        conformal_residual_q90=serving_residual_q90,
+    )
+
+    # Sliced error analysis (theo trạm, giờ trong ngày, và mức ô nhiễm)
+    sliced_errors = sliced_error_analysis(
+        test_frame,
+        serving_champion_pred,
+        config["thresholds"],
+        timestamp_column=timestamp,
+        station_column=station,
+    )
 
     artifact_dir = Path(config["artifacts"]["directory"])
     model_path = artifact_dir / config["artifacts"]["model_file"]
+    evaluation_path = artifact_dir / config["artifacts"]["evaluation_file"]
+    model_version = generate_model_version(data_path)
+
     evaluation = {
         "data_audit": audit_air_quality(raw, config),
-        "baselines": baselines,
+        "baselines": {
+            "persistence": persistence_test,
+            "seasonal_naive_24h": seasonal_naive_test,
+        },
         "backtest": backtest,
         "calibration": {
             "ml_metrics": cal_ml_metrics,
@@ -348,24 +472,28 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
             "ml_residual_quantile_90": ml_residual_q90,
             "persistence_residual_quantile_90": pers_residual_q90,
         },
-        "champion_test": test_metrics,
+        "candidate_ml_test": candidate_ml_test,
+        "persistence_test": persistence_test,
+        "seasonal_naive_test": seasonal_naive_test,
+        "serving_champion": champion_name,
+        "serving_champion_test": serving_champion_test,
+        "champion_test": serving_champion_test,  # Giữ backward compatibility cho các consumer cũ
+        "conformal_test_evaluation": conformal_test_metrics,
         "quality_gate": quality_gate,
-        "metrics_by_station": metrics_by_station(
-            test_frame,
-            prediction,
-            station,
-            config["thresholds"],
-        ),
+        "metrics_by_station": station_metrics,
+        "sliced_error_analysis": sliced_errors,
     }
-    evaluation_path = artifact_dir / config["artifacts"]["evaluation_file"]
+
     metadata = {
-        "model_version": "2026-09-01-001",
+        "model_version": model_version,
         "created_at": datetime.now(UTC).isoformat(),
         "model_name": candidate_champion,
+        "candidate_champion": candidate_champion,
         "serving_champion": champion_name,
+        "forecast_strategy": forecast_strategy,
         "selection_rule": "MAE trung bình thấp nhất trên expanding-window backtest của tập train",
         "random_state": config["project"]["random_state"],
-        "data_sha256": sha256_file(resolve_data_path(config["data"]["path"])),
+        "data_sha256": sha256_file(data_path),
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
         "sklearn_version": sklearn.__version__,
         "features": columns,
@@ -377,14 +505,21 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
         if not eval_cal_frame.empty
         else [],
         "test_period": [str(test_frame[timestamp].min()), str(test_frame[timestamp].max())],
-        "metrics": test_metrics,
+        "metrics": serving_champion_test,
+        "candidate_ml_test": candidate_ml_test,
+        "serving_champion_test": serving_champion_test,
+        "conformal_test_evaluation": conformal_test_metrics,
         "quality_gate": quality_gate,
         "prediction_interval": {
             "method": "split_conformal",
             "coverage": 0.9,
+            "coverage_target": 0.9,
             "residual_quantile": round(serving_residual_q90, 4),
             "ml_residual_quantile": round(ml_residual_q90, 4),
             "persistence_residual_quantile": round(pers_residual_q90, 4),
+            "test_picp": conformal_test_metrics["picp"],
+            "test_mean_width": conformal_test_metrics["mean_interval_width"],
+            "test_median_width": conformal_test_metrics["median_interval_width"],
         },
         "thresholds": config["thresholds"],
         "model_path": str(model_path),
@@ -397,6 +532,7 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
     else:
         metadata["evaluation"] = evaluation
     return metadata
+
 
 
 def log_mlflow(config: dict, metadata: dict, evaluation: dict, model_path: Path) -> None:

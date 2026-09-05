@@ -8,6 +8,7 @@ from sklearn.ensemble import (
     HistGradientBoostingRegressor,
     RandomForestRegressor,
 )
+from sklearn.linear_model import Ridge
 
 
 def build_model(
@@ -17,6 +18,9 @@ def build_model(
 ) -> RegressorMixin:
     """Tạo model từ tên; ném lỗi rõ ràng khi tên không được hỗ trợ."""
     params = params or {}
+    if name == "ridge":
+        defaults = {"alpha": 1.0}
+        return Ridge(random_state=random_state, **(defaults | params))
     if name == "random_forest":
         defaults = {"n_estimators": 200, "max_depth": 12, "min_samples_leaf": 2, "n_jobs": -1}
         return RandomForestRegressor(random_state=random_state, **(defaults | params))
@@ -32,3 +36,4 @@ def build_model(
             max_iter=200, learning_rate=0.05, random_state=random_state
         )
     raise ValueError(f"Mô hình không được hỗ trợ: {name}")
+

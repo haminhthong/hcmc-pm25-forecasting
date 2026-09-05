@@ -36,9 +36,12 @@ class PredictionRequest(BaseModel):
 class Interval(BaseModel):
     """Khoảng dự báo Conformal Interval."""
 
+    method: str = "split_conformal"
+    coverage_target: float = Field(default=0.9, ge=0.0, le=1.0)
+    coverage: float = Field(default=0.9, ge=0.0, le=1.0)
     lower: float
     upper: float
-    coverage: float = Field(default=0.9, ge=0.0, le=1.0)
+    width: float | None = None
 
 
 class PredictionResponse(BaseModel):
@@ -50,9 +53,12 @@ class PredictionResponse(BaseModel):
     current_pm25: float
     predicted_pm25: float
     level: str
+    forecast_strategy: str = "ml_model"
+    serving_champion: str | None = None
     interval: Interval
     model_version: str
     updated_at: str
+
 
 
 class ErrorResponse(BaseModel):

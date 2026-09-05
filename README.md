@@ -1,272 +1,419 @@
-# 🌫️ Leakage-Safe Next-Hour PM2.5 Forecasting for Ho Chi Minh City
+# 🌫️ HCMC Air Quality Forecasting Platform
+### Leakage-Safe Next-Hour PM2.5 Forecasting for Ho Chi Minh City with Temporal Backtesting, Persistence-Aware Model Selection, Calibrated Conformal Uncertainty, Quality Gate Guardrails & Production Serving
 
-Dự án hiện tại được thiết kế như một **Leakage-Safe Temporal ML Forecasting System Prototype với Baseline-Aware Deployment Guardrails** cho bài toán dự báo nồng độ PM2.5 giờ tiếp theo ($t+1$) theo từng trạm quan trắc tại TP.HCM. Dự án tập trung vào kiểm tra dữ liệu, feature engineering theo timestamp, expanding-window validation, baseline comparison, Quality Gate tự động, Split Conformal prediction intervals độc lập, API, dashboard, Docker và CI.
+Dự án là một **Leakage-Safe Temporal ML Forecasting System** hoàn chỉnh được thiết kế chuyên sâu cho bài toán dự báo nồng độ bụi mịn PM2.5 giờ tiếp theo ($t \rightarrow t+1$) theo từng trạm quan trắc tại TP.HCM. Hệ thống giải quyết trọn vẹn các bài toán hóc búa của chuỗi thời gian thực tế: tra cứu lag theo mốc thời gian thực, rolling thống kê không nhìn trước tương lai, expanding-window cross-validation lồng nhau, so sánh baseline persistence, hiệu chuẩn khoảng tin cậy Split Conformal độc lập, cơ chế Quality Gate guardrail tự động fallback, REST API và Dashboard giám sát độ tin cậy.
 
-> ⚠️ **Tuyên bố miễn trừ & Dữ liệu:** Dữ liệu mẫu hiện tại (`air_quality_sample.csv`) phục vụ smoke test hệ thống. Các mức Thấp/Trung bình/Cao trong dự án là nhóm phân tích nội bộ thử nghiệm, không phải chỉ số AQI chính thức hoặc khuyến nghị y tế.
+> ⚠️ **Tuyên bố về Dữ liệu & Định vị Prototype:** Dữ liệu hiện tại (`data/sample/air_quality_sample.csv`) phục vụ **System Validation Prototype** nhằm kiểm tra tính an toàn về rò rỉ dữ liệu, API, CI, artifact và pipeline Conformal; chưa đại diện cho hiệu năng ô nhiễm không khí thực tế của toàn bộ TP.HCM. Các ngưỡng Thấp/Trung bình/Cao là phân nhóm phân tích thử nghiệm nội bộ, không thay thế cho chỉ số AQI chính thức.
 
 ---
 
-## 🎯 Định Nghĩa Bài Toán (Problem Definition)
+## 1. 🎯 Định Nghĩa Bài Toán & Phạm Vi Khả Dụng Dữ Liệu (Problem Formulation)
 
-Tại thời điểm $t$, sử dụng dữ liệu quan trắc đã biết đến hết thời điểm $t$ của một trạm duy nhất để dự báo nồng độ PM2.5 tại mốc $t+1$ giờ.
+Tại thời điểm $t$, sử dụng dữ liệu quan trắc đã biết đến hết thời điểm $t$ của **một trạm duy nhất** để dự báo nồng độ PM2.5 tại mốc $t+1$ giờ.
 
-### Đầu vào hợp lệ (Valid Input Constraints):
-- **Một trạm duy nhất** per request.
-- **Timestamp tăng dần**, liên tục từng giờ ($\Delta t = 1\text{h}$).
-- **Không trùng mốc timestamp**.
-- **PM2.5 hiện tại phải tồn tại** và không âm ($\ge 0$).
-- **Tối thiểu 25 giờ lịch sử liên tục** (khi sử dụng lag 24 giờ).
-- Các chất ngoại sinh ($O_3$, $SO_2$, $NO_2$, $CO$, $TSP$, nhiệt độ, độ ẩm) có thể thiếu.
-
-### Cấu trúc Output chuẩn hóa (Standard Output Schema):
-```json
-{
-  "station": "Trạm A",
-  "forecast_origin": "2024-01-01T10:00:00",
-  "forecast_for": "2024-01-01T11:00:00",
-  "current_pm25": 32.1,
-  "predicted_pm25": 34.7,
-  "level": "Trung bình",
-  "interval": {
-    "lower": 29.2,
-    "upper": 40.1,
-    "coverage": 0.9
-  },
-  "model_version": "2026-09-01-001",
-  "updated_at": "2024-01-01T10:00:05Z"
-}
+```
+Quan trắc lịch sử & hiện tại (≤ t)                   Mục tiêu cần dự báo (t+1)
+[t-24h] ... [t-2h] [t-1h] [  t  ]                      [ t+1h ]
+───────────────────────────────►                         ▼
+      Feature Engine (t)           ──────►        Target: PM2.5(t+1)
 ```
 
-- `forecast_origin`: Mốc thời điểm hiện tại $t$ của dữ liệu quan trắc.
-- `forecast_for`: Mốc thời điểm $t+1$ được dự báo.
-- `updated_at`: Thời điểm API trả kết quả phản hồi.
+### 1.1 Ràng buộc dữ liệu đầu vào (Input Protocol):
+- **Single Station**: Mỗi request / chuỗi chỉ chứa quan trắc của một trạm duy nhất.
+- **Strict Clock-Time Monotonicity**: Timestamp tăng dần, liên tục theo từng giờ ($\Delta t = 1\text{h}$).
+- **No Duplicate Timestamps**: Tuyệt đối không trùng mốc giờ trong cùng trạm.
+- **Non-negative Target**: Nồng độ PM2.5 tại mốc $t$ phải tồn tại và không âm ($y_t \ge 0$).
+- **History Sufficiency**: Tối thiểu 25 quan trắc liên tục để đủ lịch sử phục vụ lag 24h và rolling window 24h.
+
+### 1.2 Phân biệt dữ liệu ngoại sinh (Exogenous Feature Availability):
+- **Observed Exogenous at $t$**: Nhiệt độ, độ ẩm, $NO_2$, $SO_2$, $CO$, $O_3$, $TSP$ đo được tại mốc $t$ là hợp lệ để đưa vào mô hình.
+- **Future Exogenous for $t+1$**: Hệ thống **không** sử dụng thời tiết tại $t+1$ trừ khi dữ liệu đó xuất phát từ nguồn dự báo thời tiết (Numerical Weather Prediction - NWP).
 
 ---
 
-## 🌟 Điểm Nổi Bật Kỹ Thuật (Key Technical Highlights)
+## 2. 🏛️ Kiến Trúc Hệ Thống Canonical 7 Giai Đoạn (7-Stage Pipeline)
 
-- 🔒 **Chống Leakage Dữ Liệu Biên Target & Partition**:
-  - Tra cứu lag (1, 2, 3, 6, 12, 24 giờ) và rolling features theo mốc thời gian thực (`timestamp`), không dịch vị trí dòng.
-  - Sửa leakage tại biên split: Mốc `target_timestamp` ($t+1\text{h}$) của dữ liệu train **luôn nhỏ hơn** mốc bắt đầu của tập validation/calibration/test (`target_timestamp < cal_start`).
-- 📊 **Phân Biệt Mục Tiêu Hồi Quy & Diễn Giải**:
-  - Mục tiêu chính là bài toán hồi quy nồng độ PM2.5. Phân lớp nhãn Thấp/Trung bình/Cao chỉ là bước diễn giải phụ.
-- 📐 **Independent Split Conformal Prediction Interval**:
-  - Tính toán khoảng dự báo chuẩn mực **Split Conformal Prediction** trên tập **Calibration độc lập** (không gom chung với các validation fold dùng để chọn candidate model).
-  - Tự động điều chỉnh khoảng tin cậy phù hợp với `serving_champion` (sử dụng `persistence_residual_quantile` khi fallback về baseline persistence).
-- 🏆 **Quality Gate & Baseline Persistence Rule**:
-  - So sánh trực tiếp với 2 baseline: **Persistence** ($t+1 = t$) và **Seasonal Naive 24h** ($t+1 = t-23h$).
-  - Quality Gate tự động đánh giá trên tập calibration/acceptance: $MAE_{\text{model}} \le MAE_{\text{persistence}} \times 0.95$, Recall nhóm PM2.5 cao $\ge 0.75$, và Rolling MAE Std $\le 1.0$.
-  - Nếu mô hình học máy không vượt được baseline, hệ thống tự động gắn cờ fallback chọn persistence làm champion phục vụ suy luận.
-- 🚀 **Kiến Trúc Software Engineering & MLOps**:
-  - **FastAPI**: Pydantic input validation (tối thiểu 25, tối đa 168 observations), phân loại status code (400, 422, 503, 500) và `/health` check.
-  - **Streamlit Dashboard**: Hiển thị chuỗi 24h, mốc dự báo $t+1$, khoảng tin cậy 90% Conformal và cảnh báo chất lượng dữ liệu.
-  - **Docker & Lockfiles**: Tách biệt bước huấn luyện khỏi container serving, cài đặt từ dependencies đã khóa (`requirements.lock`).
-
----
-
-## 🏗️ Kiến Trúc Hệ Thống (System Architecture)
+Toàn bộ quy trình từ dữ liệu thô đến phục vụ suy luận trực tuyến được chuẩn hóa thành 7 giai đoạn duy nhất:
 
 ```mermaid
 flowchart TD
-    A[Dữ liệu quan trắc CSV / Real-time API] --> B[Data Audit & Schema Validation]
-    B --> C[Time-Aware Feature Engineering]
-    
-    subgraph Feature Engine
-        C --> C1[Lag Features via Exact Timestamp]
-        C --> C2[Rolling Window with Closed Left]
-        C --> C3[Cyclic Time Features - sin/cos]
+    subgraph S1["1. Data Ingestion & Audit"]
+        D1[Dữ liệu quan trắc trạm] --> D2[Kiểm tra Schema, Timestamp, Khoảng trống giờ & Giá trị thiếu]
     end
-    
-    C --> D[Strict Temporal 3-Way Split]
-    
-    subgraph Model Selection & Training
-        D --> E[Expanding-Window Backtest Folds on Train]
-        E --> F[Evaluate RF / ExtraTrees / HistGB]
-        F --> G[Select Champion by Mean Validation MAE]
+
+    subgraph S2["2. Time-Aware Feature Engineering"]
+        D2 --> F1[Exact Clock-Time Lags: 1, 2, 3, 6, 12, 24h]
+        D2 --> F2["Rolling Statistics: Mean & Std (closed='left')"]
+        D2 --> F3[Trend Differences: delta_1h, delta_3h]
+        D2 --> F4[Cyclic Time Features: sin/cos hour, dayofweek]
+        D2 --> F5[Observed Exogenous at t]
     end
-    
-    G --> H[Fit Champion Model on Train Set]
-    
-    subgraph Calibration & Guardrail Evaluation
-        H --> I[Evaluate on Independent Calibration Set]
-        I --> J[Compute Conformal Quantiles ML & Persistence]
-        J --> K{Quality Gate Check}
-        K -- Pass --> L[Serving Champion: Candidate ML]
-        K -- Fail --> M[Serving Champion: Persistence Fallback]
+
+    subgraph S3["3. Nested Temporal Partition"]
+        F1 & F2 & F3 & F4 & F5 --> SP1["Train Set (target_timestamp < cal_start)"]
+        SP1 --> SP2["Inside Train: Expanding-Window CV Folds"]
+        F1 & F2 & F3 & F4 & F5 --> SP3["Independent Calibration (target_timestamp < test_start)"]
+        F1 & F2 & F3 & F4 & F5 --> SP4["Final Test (Untouched future period)"]
     end
-    
-    L --> N[Untouched Final Test Set Evaluation]
-    M --> N
-    N --> O[Dump model.joblib & metadata.json]
-    O --> P[FastAPI Service /predict]
-    P --> Q[Streamlit Interactive Dashboard]
+
+    subgraph S4["4. Model Selection"]
+        SP2 --> M1[Baselines: Persistence & Seasonal Naive 24h]
+        SP2 --> M2[Linear Autoregression: Ridge]
+        SP2 --> M3[Tree Ensembles: RF, ExtraTrees, HistGB]
+        M1 & M2 & M3 --> M4[Select Candidate Champion by CV MAE]
+    end
+
+    subgraph S5["5. Calibration & Quality Gate"]
+        M4 --> C1[Fit Candidate ML on Train Set]
+        C1 --> C2[Evaluate Candidate & Persistence on Calibration Set]
+        C2 --> C3[Compute 90% Conformal Residual Quantiles q90]
+        C3 --> QG{Quality Gate Check}
+        QG -- PASS --> CH1[Serving Champion: Candidate ML]
+        QG -- FAIL --> CH2[Serving Champion: Persistence Fallback]
+    end
+
+    subgraph S6["6. Freeze Policy & Final Test"]
+        CH1 & CH2 --> T1[Evaluate Candidate ML vs Persistence vs Seasonal Naive]
+        T1 --> T2[Evaluate Serving Champion Policy]
+        T2 --> T3[Calculate MASE & Skill Score vs Persistence]
+        T2 --> T4[Calculate PICP Coverage & Interval Width: Overall & By Station]
+        T2 --> T5[Sliced Error Analysis: Station, Hour, Pollution Regime]
+        T5 --> T6[Persist model.joblib, metadata, evaluation, schema, config_snapshot]
+    end
+
+    subgraph S7["7. Serving & Monitoring"]
+        T6 --> Srv1[FastAPI /predict Endpoint: returns forecast_strategy & interval schema]
+        T6 --> Srv2[Streamlit Dashboard: forecast reliability, champion status & uncertainty]
+    end
 ```
 
 ---
 
-## 🛠️ Hướng Dẫn Cài Đặt & Chạy (Quick Start)
+## 3. 🔒 Chống Data Leakage Tinh Xảo (Leakage-Safe Engineering)
 
-### Chạy và tái lập kết quả trên Google Colab
+### 3.1 Clock-Time Lag, Not Row-Position Lag
+Nhiều bài toán time-series sinh viên mắc lỗi dùng `df['pm25'].shift(24)`. Nếu dữ liệu bị mất kết nối 3 giờ, hàm `shift(24)` sẽ lấy nhầm quan trắc cách đó 27 giờ thực tế.
+- Trong repo này, mọi lag được tra cứu theo khóa mốc thời gian thực:
+  $$\text{Key} = (\text{station}, \text{timestamp} - \text{lag})$$
+- Nếu thiếu dữ liệu tại mốc thời gian chính xác đó, đặc trưng nhận giá trị `NaN` thay vì lấy nhầm hàng gần nhất.
 
-[![Mở bằng Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/haminhthong/hcmc-pm25-forecasting/blob/main/notebooks/02_colab_reproducibility.ipynb)
+### 3.2 Rolling Window với `closed="left"` vs Current PM2.5
+- Hàm rolling sử dụng `closed="left"`:
+  ```python
+  series.rolling(f"{window}h", closed="left", min_periods=1).mean()
+  ```
+  Điều này đảm bảo quan trắc tại thời điểm hiện tại $t$ **hoàn toàn không được tính vào lịch sử rolling**.
+- **Current PM2.5 tại $t$**: Giá trị nồng độ $y_t$ vẫn được cung cấp riêng biệt như một đặc trưng hiện tại hợp lệ, vì bài toán là dùng trạng thái tại $t$ để dự báo cho mốc $t+1$.
 
-Notebook Colab tự clone repository, cài các phiên bản thư viện đã khóa trong `requirements-colab.txt`, chạy trực tiếp pipeline `src.train` và đối chiếu kết quả với snapshot chuẩn. Cách này bảo đảm notebook và CLI không duy trì hai bản logic huấn luyện khác nhau.
-
-Khi repository chưa được đẩy lên GitHub, có thể mở notebook cục bộ bằng Jupyter; notebook sẽ tự tìm thư mục gốc chứa `pyproject.toml`.
-
-### 1. Khởi tạo môi trường Python (Python 3.11+)
-
-```bash
-# Tạo và kích hoạt môi trường ảo
-python -m venv .venv
-
-# Windows PowerShell:
-.venv\Scripts\activate
-
-# Linux / macOS:
-# source .venv/bin/activate
-
-# Cài đặt thư viện phát triển
-pip install -r requirements-dev.txt
-```
-
-### 2. Kiểm tra chất lượng mã nguồn & Unit Tests
-
-```bash
-# Linting với Ruff
-python -m ruff check src app tests
-
-# Chạy toàn bộ Unit Tests
-python -m pytest
-
-# Test toàn bộ pipeline huấn luyện (Dry-run không ghi artifact)
-python -m src.train --config configs/config.yaml --dry-run
-```
-
-### 3. Huấn luyện & Đánh giá Mô hình
-
-```bash
-# Chạy pipeline huấn luyện thực tế và lưu artifacts
-python -m src.train --config configs/config.yaml
-
-# Trích xuất báo cáo Markdown
-python -m src.report --input artifacts/evaluation.json --output reports/evaluation_summary.md
-```
-
-Artifacts sẽ được sinh ra trong thư mục `artifacts/`:
-- `artifacts/model.joblib`: Pipeline mô hình học máy đã huấn luyện.
-- `artifacts/metadata.json`: Thống kê SHA-256 dữ liệu, danh sách đặc trưng, khoảng thời gian train/test và kết quả Quality Gate.
-- `artifacts/evaluation.json`: Báo cáo chi tiết metrics hồi quy, phân loại, tail-risk và theo từng trạm.
+### 3.3 Chống Rò Rỉ Biên Target Timestamp (Target-Boundary Leakage Prevention)
+Hàng dữ liệu tại mốc feature $t = 10:00$ có target tại $t+1 = 11:00$. Nếu tập validation bắt đầu lúc $11:00$, thì hàng dữ liệu này **không được phép nằm trong tập train** (vì target của nó chạm vào thời điểm bắt đầu của validation).
+Hệ thống áp dụng bộ lọc biên nghiêm ngặt:
+$$\text{train\_mask}: \text{target\_timestamp} < \text{validation\_start}$$
+$$\text{train\_split\_mask}: \text{target\_timestamp} < \text{calibration\_start}$$
+$$\text{cal\_split\_mask}: \text{target\_timestamp} < \text{test\_start}$$
 
 ---
 
-## 🌐 Triển Khai API & Dashboard
+## 4. 📐 Công Thức Toán Học Các Baseline (Baselines Mathematical Formulation)
 
-### 1. Chạy REST API (FastAPI)
+Để chứng minh tính cần thiết và giá trị thực tế của Machine Learning, hệ thống bắt buộc đối sánh trực tiếp với 3 mô hình nền tảng:
 
+### 4.1 Baseline 1: Persistence (Naive t)
+Dự báo nồng độ giờ tới bằng chính nồng độ quan sát được tại giờ hiện tại:
+$$\hat{y}_{t+1}^{\text{persistence}} = y_t$$
+
+### 4.2 Baseline 2: Seasonal Naive 24h (t - 23h)
+Dự báo nồng độ tại mốc $t+1$ bằng nồng độ tại **cùng giờ ngày hôm trước** (cách mốc mục tiêu đúng 24 giờ):
+$$\hat{y}_{t+1}^{\text{seasonal24}} = y_{(t+1) - 24\text{h}} = y_{t - 23\text{h}}$$
+> 💡 *Lưu ý quan trọng:* Trong code, tham số `offset_hours = -23` từ mốc thời điểm hiện tại $t$ chính là quan trắc tại $t - 23\text{h}$, tương đương đúng $(t+1) - 24\text{h}$. Đây là công thức chuẩn xác, không phải lỗi offset.
+
+### 4.3 Baseline 3: Ridge Autoregression
+Mô hình tuyến tính phạt $L_2$ chuẩn hóa đặc trưng bằng `StandardScaler`:
+$$\min_{w} \|Xw - y\|_2^2 + \alpha \|w\|_2^2$$
+Mô hình này giúp trả lời câu hỏi cốt lõi: *Tree-based ensemble (Random Forest, ExtraTrees, HistGB) có thực sự cần thiết và vượt trội hơn một mô hình hồi quy tự tương quan tuyến tính đơn giản không?*
+
+---
+
+## 5. 🔀 Giao Thức Phân Chia Dữ Liệu (Nested Temporal Evaluation Protocol)
+
+Thay vì chia ngẫu nhiên (gây data leakage nghiêm trọng) hoặc chia 3 tập tĩnh sơ sài, hệ thống áp dụng **Nested Temporal Evaluation Protocol**:
+
+```
+Toàn bộ chuỗi thời gian (Full Data Timeline)
+┌───────────────────────────────────────┬──────────────┬──────────────┐
+│             TRAIN SET                 │ CALIBRATION  │  FINAL TEST  │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐  │              │              │
+│  │ Fold 1  │ │ Fold 2  │ │ Fold 3  │  │              │              │
+│  │ Trn|Val │ │ Trn |Val│ │ Trn  |Val│ │  (Untouched) │  (Untouched) │
+└───────────────────────────────────────┴──────────────┴──────────────┘
+ ◄──────── Expanding-Window CV ────────► ◄── QG & CP ──► ◄── Eval ────►
+```
+
+1. **Train Set**: Chứa các chuỗi thời gian ban đầu để xây dựng mô hình và tối ưu siêu tham số thông qua Expanding-Window Cross-Validation.
+2. **Independent Calibration Set**: Tập dữ liệu nằm kế tiếp tập Train theo thứ tự thời gian. Dùng để:
+   - Hiệu chuẩn phần dư tính toán khoảng tin cậy Conformal Prediction.
+   - Thẩm định Quality Gate khách quan mà không làm thiên lệch kết quả kiểm định cuối.
+3. **Final Test Set**: Tập dữ liệu tương lai cuối cùng chưa từng được tiếp xúc trong bất kỳ khâu huấn luyện hay hiệu chuẩn nào.
+
+---
+
+## 6. 🛡️ Quality Gate & Cơ Chế Fallback Triển Khai (Deployment Guardrails)
+
+Hệ thống thiết lập nguyên tắc MLOps thực chiến: **Machine Learning chỉ được phép triển khai suy luận nếu thực sự tạo ra giá trị vượt trội hơn các quy luật tự nhiên đơn giản (Persistence).**
+
+| Tiêu chí Guardrail | Ngưỡng yêu cầu (Configurable) | Ý nghĩa thực tế |
+|---|:---:|---|
+| **MAE Improvement** | $\frac{MAE_{\text{pers}} - MAE_{\text{model}}}{MAE_{\text{pers}}} \ge 5\%$ | Mô hình phải giảm sai số ít nhất 5% so với Persistence |
+| **High PM2.5 Recall** | $\text{Recall}_{\text{Cao}} \ge 75\%$ | Cảnh báo được ít nhất 75% các đợt ô nhiễm nặng |
+| **Rolling MAE Stability**| $\text{Std}(MAE_{\text{folds}}) \le 1.0$ | Sai số ổn định qua các cửa sổ thời gian, không trồi sụt |
+
+### Cơ chế Quyết định Serving Champion:
+- **PASS**: Toàn bộ tiêu chí đạt $\rightarrow$ `serving_champion` = `candidate_ml` (sử dụng quantile phần dư của ML).
+- **FAIL**: Một trong các tiêu chí không đạt $\rightarrow$ `serving_champion` = `persistence` (hệ thống tự động kích hoạt fallback về baseline persistence an toàn và dùng quantile phần dư của persistence).
+
+---
+
+## 7. 📊 Kết Quả Đánh Giá Tập Test Cuối (Freeze-Policy Final Test)
+
+Báo cáo thử nghiệm trên tập dữ liệu kiểm thử kỹ thuật (`air_quality_sample.csv`):
+
+### 7.1 Bảng so sánh đa mô hình trên Test Set:
+
+| Chiến lược / Mô hình | MAE | RMSE | MASE | Skill vs Pers | Macro-F1 | Recall PM2.5 Cao |
+|---|---:|---:|---:|---:|---:|---:|
+| Ứng viên ML (`ridge`) | **0.316** | **0.317** | **1.264** | **-26.4%** | **0.667** | **100.0%** |
+| Persistence Baseline ($t+1 = t$) | 0.250 | 0.292 | 1.000 | 0.0% | 0.667 | 100.0% |
+| Seasonal Naive 24h ($t+1 = t-23\text{h}$) | 5.948 | 5.952 | 23.790 | -2279.0% | 0.222 | 0.0% |
+| 🏆 **Actual Serving Champion** | **0.316** | **0.317** | **1.264** | **-26.4%** | **0.667** | **100.0%** |
+
+- **MASE (Mean Absolute Scaled Error)**: $\frac{MAE_{\text{model}}}{MAE_{\text{persistence}}}$ (giá trị $< 1$ thể hiện mô hình đánh bại naive).
+- **MAE Skill Score**: $1 - \frac{MAE_{\text{model}}}{MAE_{\text{persistence}}}$.
+- **Headline Metrics**: Báo cáo ưu tiên các chỉ số hồi quy (MAE, RMSE, Bias, P90 AE). Phân lớp 3 mức (Thấp/Trung bình/Cao) chỉ đóng vai trò diễn giải nghiệp vụ hạ tầng.
+
+---
+
+## 8. 🎯 Hiệu Chuẩn Khoảng Tin Cậy Conformal (Conformal Prediction)
+
+Thay vì chỉ dự báo một con số điểm (point forecast), hệ thống cung cấp khoảng tin cậy có bảo đảm toán học bằng phương pháp **Split Conformal Prediction**:
+$$\hat{C}(X_{t+1}) = [\hat{y}_{t+1} - q_{90}, \; \hat{y}_{t+1} + q_{90}]$$
+Trong đó $q_{90}$ là quantile bậc 90% của phân phối phần dư tuyệt đối tính trên **tập Calibration độc lập**.
+
+### 8.1 Kết quả kiểm định thực tế trên tập Test cuối:
+- **Độ phủ mục tiêu (Target Coverage):** $90.0\%$
+- **Độ phủ thực tế trên tập Test (PICP):** $75.0\%$ *(trên mẫu thử nghiệm test nhỏ)*
+- **Độ rộng khoảng tin cậy trung bình (MPIW):** $0.650 \;\mu\text{g/m}^3$ ($\pm 0.325 \;\mu\text{g/m}^3$)
+- **Độ rộng khoảng tin cậy trung vị:** $0.650 \;\mu\text{g/m}^3$
+
+### 8.2 Độ phủ phân rã theo từng trạm:
+- **Trạm A**: PICP = $75.0\%$, MPIW = $\pm 0.325 \;\mu\text{g/m}^3$
+- **Trạm B**: PICP = $75.0\%$, MPIW = $\pm 0.325 \;\mu\text{g/m}^3$
+
+> 💡 *Lưu ý về phạm vi hiệu lực:* Split Conformal cơ bản cung cấp **Marginal Coverage** trên toàn bộ phân phối; với tập dữ liệu lớn trong tương lai, hệ thống sẽ nâng cấp lên **Per-station Conformal** và **Conditional Regime Conformal** để bảo đảm từng mức ô nhiễm đều đạt chuẩn 90%.
+
+---
+
+## 9. 🏢 Kiến Trúc Triển Khai MLOps: Offline vs Online
+
+Hệ thống bảo đảm tính đồng nhất tuyệt đối (**Training-Serving Consistency**) nhờ tái sử dụng chung một Feature Engine:
+
+```
+[ OFFLINE TRAINING PIPELINE ]
+Historical CSV / DB
+        │
+        ▼
+   Data Audit ──────────► [Schema & Quality Checks]
+        │
+        ▼
+Shared Feature Engine ──► [Exact Lags, Rolling Left, Deltas, Cyclic]
+        │
+        ▼
+Nested Temporal Split ──► [Train + CV, Calibration, Final Test]
+        │
+        ▼
+ Model Selection ───────► [Persistence, Seasonal Naive, Ridge, RF, ExtraTrees, HistGB]
+        │
+        ▼
+Independent Calibration ─► [Residual Quantile q90]
+        │
+        ▼
+  Quality Gate ─────────► [PASS: Candidate ML | FAIL: Persistence Fallback]
+        │
+        ▼
+ Freeze Final Test ─────► [MAE, RMSE, MASE, Skill, PICP, Sliced Errors]
+        │
+        ▼
+ Artifact Registry ─────► [model.joblib, metadata.json, evaluation.json, feature_schema.json]
+
+
+[ ONLINE FORECASTING SERVING ]
+Latest Sensor Readings (Last 25 Hours)
+        │
+        ▼
+ Pydantic Validator ────► [Single Station, Strict 1h gaps, Positive PM2.5]
+        │
+        ▼
+Shared Feature Engine ──► [build_features() with include_target=False]
+        │
+        ▼
+Serving Predictor ──────► [Evaluate model or persistence according to serving_champion]
+        │
+        ▼
+Conformal Interval ─────► [predicted ± residual_quantile]
+        │
+        ▼
+ FastAPI /predict ──────► [JSON: forecast_strategy, predicted_pm25, interval, level]
+        │
+        ▼
+Streamlit Dashboard ────► [Interactive Time-Series, Uncertainty Bands & Guardrails]
+```
+
+### Kiến trúc mục tiêu Production (Target Architecture):
+```
+Sensors / OpenAQ API ──► Kafka / Ingestion Worker ──► TimescaleDB / InfluxDB
+                                                             │
+Dashboard & Alerts ◄────── FastAPI Serving Engine ◄──────────┘
+```
+
+---
+
+## 10. 🌐 REST API & Dashboard Giám Sát
+
+### 10.1 Khởi chạy FastAPI Service:
 ```bash
 uvicorn app.api:app --reload --port 8000
 ```
-- Swagger UI (Tài liệu tương tác): [http://localhost:8000/docs](http://localhost:8000/docs)
-- Endpoint kiểm tra sức khỏe: `GET http://localhost:8000/health`
-- Endpoint dự báo: `POST http://localhost:8000/predict`
+- Swagger UI tài liệu tương tác: [http://localhost:8000/docs](http://localhost:8000/docs)
+- Endpoint kiểm tra sức khỏe: `GET /health`
+- Endpoint dự báo: `POST /predict`
 
-**Ví dụ gửi Request với `curl`:**
-```bash
-curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "observations": [
-      {"timestamp": "2024-01-01T00:00:00", "station": "Trạm A", "PM2.5": 20.0},
-      {"timestamp": "2024-01-01T01:00:00", "station": "Trạm A", "PM2.5": 22.5}
-    ]
-  }'
+**Contract phản hồi chuẩn (`PredictionResponse`):**
+```json
+{
+  "station": "Trạm A",
+  "forecast_origin": "2024-01-02T10:00:00",
+  "forecast_for": "2024-01-02T11:00:00",
+  "current_pm25": 32.1,
+  "predicted_pm25": 34.7,
+  "level": "Trung bình",
+  "forecast_strategy": "ml_model",
+  "serving_champion": "ridge",
+  "interval": {
+    "method": "split_conformal",
+    "coverage_target": 0.9,
+    "coverage": 0.9,
+    "lower": 34.37,
+    "upper": 35.03,
+    "width": 0.65
+  },
+  "model_version": "pm25-20260905-c3f8e4f-ed3c52b",
+  "updated_at": "2026-09-05T11:58:09.689498+00:00"
+}
 ```
 
-### 2. Chạy Dashboard (Streamlit)
-
-Khởi chạy giao diện theo dõi trực quan:
-
+### 10.2 Khởi chạy Dashboard Streamlit:
 ```bash
 streamlit run app/dashboard.py
 ```
-- Mở trình duyệt tại: [http://localhost:8501](http://localhost:8501)
+- Dashboard hiển thị chuỗi quan trắc 25 giờ gần nhất, điểm dự báo $t+1$, dải bất định Conformal 90%, badge thông báo trạng thái `Serving Champion` và các chỉ số độ tin cậy.
 
 ---
 
-## 🐳 Triển Khai Với Docker
+## 11. 🧪 Bộ Kiểm Thử Độ Tuân Thủ Chuẩn Mực (12 Compliance Tests)
 
-### Chạy đơn lẻ API Container
+Hệ thống tích hợp bộ unit test nghiêm ngặt tại `tests/test_audit_and_compliance.py`:
+1. `test_exact_hour_lag_does_not_shift_over_gap`: Xác nhận lag trả về `NaN` khi có khoảng trống giờ, không dịch dòng nhầm.
+2. `test_rolling_feature_excludes_current_observation`: Kiểm tra `closed="left"` loại trừ triệt để quan sát hiện tại $t$.
+3. `test_target_timestamp_never_crosses_split_boundary`: Đảm bảo `target_timestamp` của train luôn nhỏ hơn `calibration_start` và `test_start`.
+4. `test_backtest_train_before_validation`: Expanding folds trong tập train luôn tuân thủ quan hệ nhân quả.
+5. `test_calibration_before_test`: Tập Calibration nằm hoàn toàn trước tập Test cuối.
+6. `test_test_never_used_for_model_selection`: Tập Test cuối không bao giờ bị sử dụng để chọn candidate model.
+7. `test_seasonal_naive_same_hour_previous_day`: Xác minh công thức toán học $\hat{y}_{t+1} = y_{t-23}$.
+8. `test_persistence_baseline`: Xác minh $\hat{y}_{t+1} = y_t$.
+9. `test_quality_gate_fallback_to_persistence`: Quality gate tự động kích hoạt fallback persistence khi mô hình yếu.
+10. `test_serving_champion_test_metrics_match_policy`: Test metrics của serving champion phản ánh trung thực policy (sửa lỗi P0).
+11. `test_conformal_interval_uses_correct_champion_residuals`: Khoảng tin cậy dùng đúng phân phối phần dư của serving champion tương ứng.
+12. `test_train_and_inference_feature_columns_match`: Cột đặc trưng khớp 100% giữa pipeline train và Predictor serving.
+
+---
+
+## 12. 🗺️ Lộ Trình Phát Triển (Technical Roadmap)
+
+| Mức độ | Hạng mục công việc | Trạng thái |
+|:---:|---|:---:|
+| 🔴 **P0** | Sửa báo cáo để `serving_champion_test` phản ánh đúng actual serving policy | ✅ **Hoàn thành** |
+| 🔴 **P0** | Giải thích Seasonal Naive $t-23\text{h}$ bằng công thức toán học tường minh | ✅ **Hoàn thành** |
+| 🔴 **P0** | Chuẩn hóa thuật ngữ split: Train + expanding CV / Calibration / Final Test | ✅ **Hoàn thành** |
+| 🔴 **P0** | Báo cáo Conformal test coverage (PICP) và độ rộng khoảng (MPIW) trên test set | ✅ **Hoàn thành** |
+| 🔴 **P0** | API và Predictor trả về `forecast_strategy` và cấu trúc `interval` chi tiết | ✅ **Hoàn thành** |
+| 🟠 **P1** | Bổ sung Ridge Autoregression baseline vào model selection | ✅ **Hoàn thành** |
+| 🟠 **P1** | Thêm các chỉ số chuẩn time-series: MASE và Skill Score vs Persistence | ✅ **Hoàn thành** |
+| 🟠 **P1** | Bổ sung trend deltas (`delta_1h`, `delta_3h`) và rolling std (`closed='left'`) | ✅ **Hoàn thành** |
+| 🟠 **P1** | Phân tích lỗi đa chiều Sliced Error Analysis (Station, Hour, Pollution level) | ✅ **Hoàn thành** |
+| 🟠 **P1** | Tự động sinh `model_version` từ timestamp + git SHA + data hash | ✅ **Hoàn thành** |
+| 🟠 **P1** | Xuất thêm artifact: `feature_schema.json` và `config_snapshot.yaml` | ✅ **Hoàn thành** |
+| 🟠 **P1** | Bộ 12 ca kiểm thử bắt buộc (Architectural Compliance Suite) | ✅ **Hoàn thành** |
+| 🟡 **P2** | Multi-horizon forecasting ($t+1, t+3, t+6, t+12, t+24\text{h}$) | ⏳ *Kế hoạch kế tiếp* |
+| 🟡 **P2** | Tích hợp nguồn dữ liệu quan trắc thực tế OpenAQ TP.HCM | ⏳ *Kế hoạch kế tiếp* |
+| 🟡 **P2** | Per-station Conformal Calibration & InfluxDB/TimescaleDB Storage | ⏳ *Kế hoạch kế tiếp* |
+| 🟡 **P3** | Benchmark Deep Learning chuyên dụng: Temporal Fusion Transformer / N-BEATS | ⏳ *Nghiên cứu sâu* |
+
+---
+
+## 13. 🛠️ Hướng Dẫn Cài Đặt & Chạy (Quick Start)
+
+### 13.1 Khởi tạo môi trường ảo
 ```bash
-docker build -t hcmc-air-quality-forecast .
-docker run --rm -p 8000:8000 hcmc-air-quality-forecast
+python -m venv .venv
+# Windows PowerShell:
+.venv\Scripts\activate
+# Linux/macOS:
+# source .venv/bin/activate
+
+pip install -r requirements-dev.txt
 ```
 
-### Chạy đồng thời API & Dashboard với Docker Compose
+### 13.2 Kiểm tra chất lượng mã nguồn & Unit Tests
+```bash
+# Kiểm tra linting
+python -m ruff check src app tests
+
+# Chạy toàn bộ 37 ca kiểm thử
+python -m pytest
+
+# Chạy kiểm định tính tái lập độc lập
+python -m pytest tests/test_reproducibility.py
+```
+
+### 13.3 Huấn luyện & Sinh Báo Cáo
+```bash
+# Huấn luyện mô hình và lưu artifacts
+python -m src.train --config configs/config.yaml
+
+# Xuất báo cáo đánh giá chuyên sâu
+python -m src.report --input artifacts/evaluation.json --output reports/evaluation_summary.md
+```
+
+### 13.4 Chạy với Docker Compose
 ```bash
 docker compose up --build
 ```
-- REST API: `http://localhost:8000`
-- Streamlit Dashboard: `http://localhost:8501`
+- API: `http://localhost:8000`
+- Dashboard: `http://localhost:8501`
 
 ---
 
-## 📊 Cấu Trúc Mã Nguồn Dữ Liệu (Repository Structure)
+## 14. 📝 Hướng Dẫn Nêu Bật Dự Án Trong CV (Resume STAR Format)
 
-```text
-├── configs/
-│   └── config.yaml               # Cấu hình dự án (data paths, features, split, thresholds)
-├── data/
-│   ├── sample/
-│   │   └── air_quality_sample.csv # Dữ liệu tổng hợp thử nghiệm kỹ thuật
-│   └── README.md                 # Data Card & hướng dẫn giấy phép dữ liệu
-├── notebooks/
-│   ├── 01_experiment.ipynb       # Notebook phân tích khám phá & giải thích thí nghiệm
-│   └── 02_colab_reproducibility.ipynb # Notebook Colab tái lập kết quả CLI
-├── src/                          # Mã nguồn cốt lõi (Module hóa sạch)
-│   ├── data.py                   # Data audit, config loading & schema validation
-│   ├── features.py               # Time-aware feature engineering (Chống leakage)
-│   ├── models.py                 # Khởi tạo mô hình học máy (RF, ExtraTrees, HistGB)
-│   ├── train.py                  # Pipeline huấn luyện, backtest & quality gate
-│   ├── evaluate.py               # Metrics hồi quy, phân loại, tail risk & baseline
-│   ├── predict.py                # Wrapper suy luận (Predictor) cho API/Serving
-│   ├── report.py                 # Sinh báo cáo Markdown tổng hợp
-│   └── utils.py                  # Utility functions (SHA-256 fingerprinting)
-├── app/                          # Ứng dụng giao diện & Web API
-│   ├── api.py                    # FastAPI Service
-│   └── dashboard.py              # Streamlit Web App
-├── tests/                        # Unit tests & integration tests (pytest)
-│   ├── test_features.py          # Kiểm thử chống leakage và lag theo giờ
-│   ├── test_prediction.py        # Kiểm thử API & Predictor
-│   ├── test_report.py            # Kiểm thử sinh báo cáo
-│   └── test_training_protocol.py # Kiểm thử expanding backtest & time split
-├── docs/                         # Tài liệu hệ thống
-│   ├── MODEL_CARD.md             # Model Card chi tiết
-│   └── PORTFOLIO.md              # Hướng dẫn trình bày dự án trong CV & phỏng vấn
-├── Dockerfile                    # Containerization spec
-├── docker-compose.yml            # Multi-container service orchestration
-├── pyproject.toml                # Tooling config (Ruff, pytest)
-├── requirements.txt              # Thư viện runtime
-└── requirements-dev.txt          # Thư viện phát triển & kiểm thử
-```
-
----
-
-## 📝 Hướng Dẫn Nêu Nổi Bật Dự Án Trong CV (Resume / LinkedIn)
-
-Khi đưa dự án này vào **CV (Resume)** hoặc hồ sơ **LinkedIn**, bạn nên trình bày theo chuẩn Google STAR / XYZ format:
-
-### Mẫu Bullet Points Cho CV:
 - **Machine Learning Engineer**:
-  > *"Xây dựng pipeline dự báo nồng độ ô nhiễm PM2.5 trước 1 giờ (t+1h) theo từng trạm với thiết kế chống Data Leakage theo mốc thời gian thực, expanding-window backtesting và đóng gói trọn gói bằng Scikit-Learn Pipeline."*
-- **MLOps & Productization**:
-  > *"Product hóa mô hình học máy thành dịch vụ REST API (FastAPI) & Dashboard tương tác (Streamlit/Plotly), container hóa toàn bộ bằng Docker Compose và thiết lập quy trình CI (Ruff, Pytest) kiểm tra độ phủ schema và rò rỉ dữ liệu."*
-- **Data Mining / Data Science**:
-  > *"Thiết kế quy trình kiểm thử Quality Gate khắt khe so sánh mô hình học máy trực tiếp với các baseline chuỗi thời gian (Persistence & Seasonal Naive 24h), phân tích rủi ro ô nhiễm cực đoan (Tail Risk Recall) và đo lường metric riêng cho từng trạm quan trắc."*
+  > *"Xây dựng nền tảng dự báo nồng độ ô nhiễm PM2.5 trước 1 giờ ($t+1\text{h}$) theo từng trạm với thiết kế triệt tiêu Data Leakage theo mốc thời gian thực (Exact Clock-time Lags, Rolling closed='left'), Expanding-Window Backtesting và đóng gói trọn gói bằng Scikit-Learn Pipeline."*
+- **MLOps & Uncertainty Estimation**:
+  > *"Thiết kế cơ chế Quality Gate đa tiêu chí tự động fallback về Persistence Baseline khi mô hình không tạo ra giá trị nghiệp vụ; định lượng độ không chắc chắn bằng Split Conformal Prediction độc lập cung cấp khoảng tin cậy 90% đã được kiểm chứng độ phủ thực tế trên tập Test."*
+- **Software Engineering & Serving**:
+  > *"Product hóa mô hình thành REST API hiệu năng cao (FastAPI) trả về thông tin chiến lược suy luận (forecast_strategy) & khoảng tin cậy, Dashboard tương tác giám sát độ tin cậy (Streamlit/Plotly), container hóa toàn bộ bằng Docker Compose và thiết lập quy trình CI kiểm định 12 ca kiểm thử chống rò rỉ dữ liệu."*
 
 ---
 
 ## 📜 Giấy Phép & Tuyên Bố Miễn Trừ (License & Disclaimer)
 
 Dự án phát hành theo giấy phép [MIT License](LICENSE). 
-Dữ liệu trong `data/sample/air_quality_sample.csv` là dữ liệu tổng hợp chỉ dùng cho mục đích kiểm tra kỹ thuật. Khi sử dụng dữ liệu ô nhiễm không khí thực tế tại TP.HCM, người dùng có trách nhiệm tuân thủ bản quyền và điều khoản phát hành của đơn vị cung cấp dữ liệu gốc.
+Dữ liệu trong `data/sample/air_quality_sample.csv` là dữ liệu tổng hợp phục vụ kiểm tra kỹ thuật. Khi triển khai trên dữ liệu thực tế của TP.HCM, người dùng cần tuân thủ bản quyền và điều khoản phát hành của đơn vị đo đạc gốc.

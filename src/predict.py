@@ -71,15 +71,19 @@ class Predictor:
         serving_champion = self.metadata.get("serving_champion")
         if serving_champion == "persistence":
             value = max(0.0, float(latest[target_column].iloc[0]))
+            strategy = "persistence_fallback"
         else:
             value = max(0.0, float(self.model.predict(model_input)[0]))
+            strategy = self.metadata.get("forecast_strategy", "ml_model")
 
         thresholds = self.config["thresholds"]
         low_max, medium_max, labels = get_threshold_params(thresholds)
 
         interval_info = self.metadata.get("prediction_interval", {})
         q90 = float(interval_info.get("residual_quantile", 5.0))
-        coverage = float(interval_info.get("coverage", 0.9))
+        coverage_target = float(
+            interval_info.get("coverage_target", interval_info.get("coverage", 0.9))
+        )
         lower = max(0.0, float(value - q90))
         upper = float(value + q90)
 
@@ -93,11 +97,17 @@ class Predictor:
             "current_pm25": float(latest[target_column].iloc[0]),
             "predicted_pm25": round(value, 3),
             "level": str(classify_pm25([value], low_max, medium_max, labels)[0]),
+            "forecast_strategy": strategy,
+            "serving_champion": serving_champion or strategy,
             "interval": {
+                "method": str(interval_info.get("method", "split_conformal")),
+                "coverage_target": coverage_target,
+                "coverage": coverage_target,
                 "lower": round(lower, 2),
                 "upper": round(upper, 2),
-                "coverage": coverage,
+                "width": round(upper - lower, 2),
             },
             "model_version": self.metadata.get("model_version", "2026-09-01"),
             "updated_at": datetime.now(UTC).isoformat(),
         }
+

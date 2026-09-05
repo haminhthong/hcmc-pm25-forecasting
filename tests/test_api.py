@@ -31,10 +31,15 @@ def test_api_prediction_response_schema(monkeypatch):
         "current_pm25": 32.1,
         "predicted_pm25": 34.7,
         "level": "Trung bình",
+        "forecast_strategy": "ml_model",
+        "serving_champion": "random_forest",
         "interval": {
+            "method": "split_conformal",
+            "coverage_target": 0.9,
+            "coverage": 0.9,
             "lower": 29.2,
             "upper": 40.1,
-            "coverage": 0.9,
+            "width": 10.9,
         },
         "model_version": "2026-09-01-001",
         "updated_at": "2024-01-01T10:00:00Z",
@@ -54,4 +59,7 @@ def test_api_prediction_response_schema(monkeypatch):
     res = response.json()
     assert res["station"] == "Trạm A"
     assert res["predicted_pm25"] == 34.7
+    assert res["forecast_strategy"] == "ml_model"
     assert res["interval"]["coverage"] == 0.9
+    assert res["interval"]["method"] == "split_conformal"
+

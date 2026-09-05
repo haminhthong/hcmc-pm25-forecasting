@@ -41,22 +41,35 @@ else:
 
         if response.status_code == 200:
             result = response.json()
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("PM2.5 Hiện tại (Origin)", f"{result['current_pm25']:.1f} µg/m³")
-            c2.metric("Dự báo Giờ tới (Target)", f"{result['predicted_pm25']:.1f} µg/m³")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("PM2.5 Hiện tại (t)", f"{result['current_pm25']:.1f} µg/m³")
+            c2.metric("Dự báo Giờ tới (t+1)", f"{result['predicted_pm25']:.1f} µg/m³")
             c3.metric("Mức phân tích", result["level"])
 
             interval = result.get("interval", {})
             interval_str = (
                 f"[{interval.get('lower', 0):.1f} - {interval.get('upper', 0):.1f}] µg/m³"
             )
-            c4.metric("Khoảng dự báo (90% Conformal)", interval_str)
-
-            st.info(
-                f"**Mô hình:** `{result.get('model_version', '2026-09-01')}` · "
-                f"**Forecast Origin (t):** {result.get('forecast_origin')} · "
-                f"**Forecast For (t+1):** {result.get('forecast_for')}"
+            c4.metric("Khoảng 90% Conformal", interval_str)
+            width = interval.get(
+                "width",
+                round(interval.get("upper", 0) - interval.get("lower", 0), 2),
             )
+            c5.metric("Độ rộng khoảng (MPIW)", f"±{width / 2:.1f} µg/m³")
+
+            strategy = result.get("forecast_strategy", "ml_model")
+            serving_champ = result.get("serving_champion", "unknown")
+            if strategy == "ml_model":
+                badge = f"🟢 **Serving Champion:** `{serving_champ}` (ML Model đạt Quality Gate)"
+            else:
+                badge = "🟠 **Serving Champion:** `Persistence Fallback` (Quality Gate an toàn)"
+
+            st.markdown(
+                f"{badge} · **Mã phiên bản:** `{result.get('model_version', 'latest')}` · "
+                f"**Origin (t):** `{result.get('forecast_origin')}` · "
+                f"**Target (t+1):** `{result.get('forecast_for')}`"
+            )
+
 
             # Vẽ biểu đồ chuỗi thời gian lịch sử và mốc dự báo
             fig = go.Figure()

@@ -1,13 +1,15 @@
 {
   "data_sha256": "ed3c52b80ffecd1093b386cc5bc8d1a0359da790ce1b998f4c08950b6750babb",
-  "model_name": "extra_trees",
+  "model_name": "ridge",
   "metrics": {
-    "mae": 2.4130249999999926,
-    "rmse": 2.489983011549978,
-    "macro_f1": 0.2222222222222222,
-    "qwk": 0,
-    "high_pm25_mae": 2.853892857142848,
-    "high_pm25_recall": 0
+    "mae": 0.31596576071541627,
+    "rmse": 0.3167288628807711,
+    "macro_f1": 0.6666666666666666,
+    "qwk": 1.0,
+    "high_pm25_mae": 0.3134952073743964,
+    "high_pm25_recall": 1.0
   },
-  "extra_trees_backtest_mae_mean": 2.0764847222222214
+  "ridge_backtest_mae_mean": 0.381177349029868,
+  "extra_trees_backtest_mae_mean": 2.005533402777786
 }
+
