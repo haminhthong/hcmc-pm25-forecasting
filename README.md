@@ -1,8 +1,8 @@
 # 🌫️ Leakage-Safe Next-Hour PM2.5 Forecasting for Ho Chi Minh City
 
-Dự án portfolio mô phỏng vòng đời kỹ thuật của một hệ thống **Dự báo nồng độ PM2.5 giờ tiếp theo (\(t+1\))** theo từng trạm quan trắc tại TP.HCM. Dự án tập trung vào kiểm tra dữ liệu, feature engineering theo timestamp, expanding-window validation, baseline comparison, Quality Gate tự động, Split Conformal prediction intervals, API, dashboard, Docker và CI.
+Dự án hiện tại được thiết kế như một **Leakage-Safe Temporal ML Forecasting System Prototype với Baseline-Aware Deployment Guardrails** cho bài toán dự báo nồng độ PM2.5 giờ tiếp theo ($t+1$) theo từng trạm quan trắc tại TP.HCM. Dự án tập trung vào kiểm tra dữ liệu, feature engineering theo timestamp, expanding-window validation, baseline comparison, Quality Gate tự động, Split Conformal prediction intervals độc lập, API, dashboard, Docker và CI.
 
-> ⚠️ **Tuyên bố miễn trừ:** Các mức Thấp/Trung bình/Cao trong dự án là nhóm phân tích nội bộ thử nghiệm, không phải chỉ số AQI chính thức hoặc khuyến nghị y tế.
+> ⚠️ **Tuyên bố miễn trừ & Dữ liệu:** Dữ liệu mẫu hiện tại (`air_quality_sample.csv`) phục vụ smoke test hệ thống. Các mức Thấp/Trung bình/Cao trong dự án là nhóm phân tích nội bộ thử nghiệm, không phải chỉ số AQI chính thức hoặc khuyến nghị y tế.
 
 ---
 
@@ -47,14 +47,15 @@ Tại thời điểm $t$, sử dụng dữ liệu quan trắc đã biết đến
 
 - 🔒 **Chống Leakage Dữ Liệu Biên Target & Partition**:
   - Tra cứu lag (1, 2, 3, 6, 12, 24 giờ) và rolling features theo mốc thời gian thực (`timestamp`), không dịch vị trí dòng.
-  - Sửa leakage tại biên split: Mốc `target_timestamp` ($t+1\text{h}$) của dữ liệu train **luôn nhỏ hơn** mốc bắt đầu của tập validation/test (`target_timestamp < test_start`).
+  - Sửa leakage tại biên split: Mốc `target_timestamp` ($t+1\text{h}$) của dữ liệu train **luôn nhỏ hơn** mốc bắt đầu của tập validation/calibration/test (`target_timestamp < cal_start`).
 - 📊 **Phân Biệt Mục Tiêu Hồi Quy & Diễn Giải**:
   - Mục tiêu chính là bài toán hồi quy nồng độ PM2.5. Phân lớp nhãn Thấp/Trung bình/Cao chỉ là bước diễn giải phụ.
-- 📐 **Split Conformal Prediction Interval**:
-  - Thay thế chỉ số tự tạo (tree confidence heuristic) bằng khoảng dự báo chuẩn mực **Split Conformal Prediction** ($\text{coverage} = 0.90$) tính từ residual quantile 90% ở tập validation.
+- 📐 **Independent Split Conformal Prediction Interval**:
+  - Tính toán khoảng dự báo chuẩn mực **Split Conformal Prediction** trên tập **Calibration độc lập** (không gom chung với các validation fold dùng để chọn candidate model).
+  - Tự động điều chỉnh khoảng tin cậy phù hợp với `serving_champion` (sử dụng `persistence_residual_quantile` khi fallback về baseline persistence).
 - 🏆 **Quality Gate & Baseline Persistence Rule**:
   - So sánh trực tiếp với 2 baseline: **Persistence** ($t+1 = t$) và **Seasonal Naive 24h** ($t+1 = t-23h$).
-  - Quality Gate tự động đánh giá: $MAE_{\text{model}} \le MAE_{\text{persistence}} \times 0.95$, Recall nhóm PM2.5 cao $\ge 0.75$, và Rolling MAE Std $\le 1.0$.
+  - Quality Gate tự động đánh giá trên tập calibration/acceptance: $MAE_{\text{model}} \le MAE_{\text{persistence}} \times 0.95$, Recall nhóm PM2.5 cao $\ge 0.75$, và Rolling MAE Std $\le 1.0$.
   - Nếu mô hình học máy không vượt được baseline, hệ thống tự động gắn cờ fallback chọn persistence làm champion phục vụ suy luận.
 - 🚀 **Kiến Trúc Software Engineering & MLOps**:
   - **FastAPI**: Pydantic input validation (tối thiểu 25, tối đa 168 observations), phân loại status code (400, 422, 503, 500) và `/health` check.
@@ -76,26 +77,29 @@ flowchart TD
         C --> C3[Cyclic Time Features - sin/cos]
     end
     
-    C --> D[Temporal Train / Test Split]
+    C --> D[Strict Temporal 3-Way Split]
     
     subgraph Model Selection & Training
-        D --> E[Expanding-Window Backtest Folds]
+        D --> E[Expanding-Window Backtest Folds on Train]
         E --> F[Evaluate RF / ExtraTrees / HistGB]
-        F --> G[Select Champion based on Train MAE]
+        F --> G[Select Champion by Mean Validation MAE]
     end
     
-    G --> H[Fit Champion on Full Train Set]
-    H --> I[Evaluate on Independent Test Set]
+    G --> H[Fit Champion Model on Train Set]
     
-    subgraph Quality Assurance
-        I --> J{Thắng Persistence Baseline?}
-        J -- Yes --> K[Quality Gate: ĐẠT]
-        J -- No --> L[Quality Gate: KHÔNG ĐẠT]
+    subgraph Calibration & Guardrail Evaluation
+        H --> I[Evaluate on Independent Calibration Set]
+        I --> J[Compute Conformal Quantiles ML & Persistence]
+        J --> K{Quality Gate Check}
+        K -- Pass --> L[Serving Champion: Candidate ML]
+        K -- Fail --> M[Serving Champion: Persistence Fallback]
     end
     
-    K --> M[Dump model.joblib & metadata.json]
-    M --> N[FastAPI Service /predict]
-    N --> O[Streamlit Interactive Dashboard]
+    L --> N[Untouched Final Test Set Evaluation]
+    M --> N
+    N --> O[Dump model.joblib & metadata.json]
+    O --> P[FastAPI Service /predict]
+    P --> Q[Streamlit Interactive Dashboard]
 ```
 
 ---

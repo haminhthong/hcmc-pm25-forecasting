@@ -24,7 +24,12 @@ def get_threshold_params(thresholds: dict) -> tuple[float, float, list[str]]:
     return low_max, medium_max, labels
 
 
-def classify_pm25(values, low_max: float = 12.0, medium_max: float = 35.5, labels: list[str] | tuple[str, ...] = VALID_LABELS):
+def classify_pm25(
+    values,
+    low_max: float = 12.0,
+    medium_max: float = 35.5,
+    labels: list[str] | tuple[str, ...] = VALID_LABELS,
+):
     """Chuyển nồng độ PM2.5 thành ba mức phân tích nội bộ (Thấp, Trung bình, Cao)."""
     array = np.asarray(values, dtype=float)
     label_list = list(labels)
@@ -114,5 +119,7 @@ def metrics_by_station(
     values = np.asarray(predictions)
     for station, indices in frame.groupby(station_column).indices.items():
         subset = frame.iloc[indices]["target_next_hour"]
-        result[str(station)] = regression_and_classification_metrics(subset, values[indices], thresholds)
+        result[str(station)] = regression_and_classification_metrics(
+            subset, values[indices], thresholds
+        )
     return result

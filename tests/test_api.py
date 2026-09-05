@@ -18,10 +18,7 @@ def test_api_returns_503_when_model_missing(monkeypatch):
 def test_api_rejects_oversized_payload():
     client = TestClient(api.app)
     dates = pd.date_range("2024-01-01", periods=200, freq="h").astype(str)
-    records = [
-        {"timestamp": dates[i], "station": "A", "PM2.5": 10.0}
-        for i in range(200)
-    ]
+    records = [{"timestamp": dates[i], "station": "A", "PM2.5": 10.0} for i in range(200)]
     response = client.post("/predict", json={"observations": records})
     assert response.status_code == 422
 
@@ -51,10 +48,7 @@ def test_api_prediction_response_schema(monkeypatch):
     client = TestClient(api.app)
 
     dates = pd.date_range("2024-01-01", periods=25, freq="h").astype(str)
-    payload = [
-        {"timestamp": dates[i], "station": "Trạm A", "PM2.5": 30.0}
-        for i in range(25)
-    ]
+    payload = [{"timestamp": dates[i], "station": "Trạm A", "PM2.5": 30.0} for i in range(25)]
     response = client.post("/predict", json={"observations": payload})
     assert response.status_code == 200, response.json()
     res = response.json()

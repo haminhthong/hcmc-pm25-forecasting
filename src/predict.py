@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
-import numpy as np
 import pandas as pd
-
-import json
 
 from src.evaluate import classify_pm25, get_threshold_params
 from src.features import build_features, model_feature_columns
@@ -46,9 +44,7 @@ class Predictor:
         required_history_hours = max(max(lags), max(windows))
 
         if len(observations) < required_history_hours + 1:
-            raise ValueError(
-                f"Cần tối thiểu {required_history_hours + 1} quan trắc để dự báo."
-            )
+            raise ValueError(f"Cần tối thiểu {required_history_hours + 1} quan trắc để dự báo.")
 
         observations[timestamp_column] = pd.to_datetime(
             observations[timestamp_column],
@@ -83,6 +79,7 @@ class Predictor:
 
         interval_info = self.metadata.get("prediction_interval", {})
         q90 = float(interval_info.get("residual_quantile", 5.0))
+        coverage = float(interval_info.get("coverage", 0.9))
         lower = max(0.0, float(value - q90))
         upper = float(value + q90)
 
@@ -99,7 +96,7 @@ class Predictor:
             "interval": {
                 "lower": round(lower, 2),
                 "upper": round(upper, 2),
-                "coverage": 0.9,
+                "coverage": coverage,
             },
             "model_version": self.metadata.get("model_version", "2026-09-01"),
             "updated_at": datetime.now(UTC).isoformat(),

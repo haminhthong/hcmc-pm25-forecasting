@@ -46,11 +46,7 @@ def make_pipeline(config: dict, model_name: str) -> tuple[Pipeline, list[str]]:
             ),
         ]
     )
-    params = (
-        config["model"].get("params", {})
-        if model_name == config["model"]["name"]
-        else {}
-    )
+    params = config["model"].get("params", {}) if model_name == config["model"]["name"] else {}
     model = build_model(model_name, config["project"]["random_state"], params)
     return Pipeline([("preprocess", preprocessor), ("model", model)]), [*numeric, station]
 
@@ -83,20 +79,41 @@ def expanding_time_folds(
 def split_by_time(
     frame: pd.DataFrame,
     test_fraction: float,
+    calibration_fraction: float = 0.0,
     timestamp_column: str = "timestamp",
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Chia theo mốc thời gian sao cho target_timestamp của train nhỏ hơn mốc test_start."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Chia theo mốc thời gian sao cho target_timestamp của train nhỏ hơn mốc cal_start và test_start."""
     periods = np.sort(frame[timestamp_column].unique())
-    test_period_count = max(1, int(np.ceil(len(periods) * test_fraction)))
-    if test_period_count >= len(periods):
-        raise ValueError("Dữ liệu quá ít để tạo tập kiểm thử cuối theo thời gian.")
+    total_periods = len(periods)
+    test_period_count = max(1, int(np.ceil(total_periods * test_fraction)))
+    cal_period_count = (
+        int(np.ceil(total_periods * calibration_fraction)) if calibration_fraction > 0 else 0
+    )
+
+    if test_period_count + cal_period_count >= total_periods:
+        raise ValueError("Dữ liệu quá ít để tạo các tập kiểm thử và hiệu chuẩn theo thời gian.")
+
     test_start = periods[-test_period_count]
-    if "target_timestamp" in frame.columns:
-        train_frame = frame[frame["target_timestamp"] < test_start].copy()
+    if cal_period_count > 0:
+        cal_start = periods[-(test_period_count + cal_period_count)]
+        if "target_timestamp" in frame.columns:
+            train_frame = frame[frame["target_timestamp"] < cal_start].copy()
+        else:
+            train_frame = frame[frame[timestamp_column] < cal_start].copy()
+
+        cal_mask = (frame[timestamp_column] >= cal_start) & (frame[timestamp_column] < test_start)
+        if "target_timestamp" in frame.columns:
+            cal_mask = cal_mask & (frame["target_timestamp"] < test_start)
+        cal_frame = frame[cal_mask].copy()
     else:
-        train_frame = frame[frame[timestamp_column] < test_start].copy()
+        if "target_timestamp" in frame.columns:
+            train_frame = frame[frame["target_timestamp"] < test_start].copy()
+        else:
+            train_frame = frame[frame[timestamp_column] < test_start].copy()
+        cal_frame = pd.DataFrame(columns=frame.columns)
+
     test_frame = frame[frame[timestamp_column] >= test_start].copy()
-    return train_frame, test_frame
+    return train_frame, cal_frame, test_frame
 
 
 def evaluate_candidate(
@@ -183,11 +200,7 @@ def build_quality_gate(
     persistence_mae = persistence_metrics["mae"]
     high_recall = champion_metrics.get("high_pm25_recall", 0.0)
 
-    improvement = (
-        (persistence_mae - champion_mae) / persistence_mae
-        if persistence_mae > 0
-        else 0.0
-    )
+    improvement = (persistence_mae - champion_mae) / persistence_mae if persistence_mae > 0 else 0.0
 
     passes_mae = champion_mae <= persistence_mae * (1.0 - min_improvement)
     passes_recall = high_recall >= min_high_recall
@@ -247,43 +260,81 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
         .sort_values(timestamp, kind="stable")
         .reset_index(drop=True)
     )
-    train_frame, test_frame = split_by_time(
+    test_fraction = config["split"]["test_fraction"]
+    calibration_fraction = config["split"].get("calibration_fraction", 0.1)
+
+    train_frame, cal_frame, test_frame = split_by_time(
         frame,
-        config["split"]["test_fraction"],
-        timestamp,
+        test_fraction=test_fraction,
+        calibration_fraction=calibration_fraction,
+        timestamp_column=timestamp,
     )
 
     _, columns = make_pipeline(config, config["model"]["name"])
-    candidates = config.get("model_comparison", {}).get(
-        "candidates", [config["model"]["name"]]
-    )
-    backtest = {
-        name: evaluate_candidate(name, train_frame, config, columns)
-        for name in candidates
-    }
+    candidates = config.get("model_comparison", {}).get("candidates", [config["model"]["name"]])
+    backtest = {name: evaluate_candidate(name, train_frame, config, columns) for name in candidates}
     candidate_champion = min(backtest, key=lambda name: backtest[name]["mae_mean"])
     pipeline, columns = make_pipeline(config, candidate_champion)
     pipeline.fit(train_frame[columns], train_frame["target_next_hour"])
-    prediction = pipeline.predict(test_frame[columns])
-    baselines = evaluate_baselines(test_frame, target, config["thresholds"])
-    metrics = regression_and_classification_metrics(
-        test_frame["target_next_hour"],
-        prediction,
+
+    # Đánh giá calibration độc lập và tính residual quantile cho Conformal Prediction
+    eval_cal_frame = cal_frame if not cal_frame.empty else train_frame
+    ml_cal_prediction = pipeline.predict(eval_cal_frame[columns])
+    pers_cal_prediction = persistence_predictions(eval_cal_frame, target)
+
+    ml_cal_abs_err = np.abs(eval_cal_frame["target_next_hour"].to_numpy() - ml_cal_prediction)
+    pers_cal_abs_err = np.abs(eval_cal_frame["target_next_hour"].to_numpy() - pers_cal_prediction)
+
+    ml_residual_q90 = (
+        float(np.quantile(ml_cal_abs_err, 0.9))
+        if len(ml_cal_abs_err) > 0
+        else backtest[candidate_champion]["residual_quantile_90"]
+    )
+    pers_residual_q90 = (
+        float(np.quantile(pers_cal_abs_err, 0.9))
+        if len(pers_cal_abs_err) > 0
+        else float(
+            np.quantile(
+                np.abs(
+                    test_frame["target_next_hour"].to_numpy()
+                    - persistence_predictions(test_frame, target)
+                ),
+                0.9,
+            )
+        )
+    )
+
+    cal_ml_metrics = regression_and_classification_metrics(
+        eval_cal_frame["target_next_hour"],
+        ml_cal_prediction,
         config["thresholds"],
     )
+    cal_pers_metrics = regression_and_classification_metrics(
+        eval_cal_frame["target_next_hour"],
+        pers_cal_prediction,
+        config["thresholds"],
+    )
+
     quality_gate = build_quality_gate(
-        metrics,
-        baselines["persistence"],
+        cal_ml_metrics,
+        cal_pers_metrics,
         backtest[candidate_champion]["mae_std"],
         config,
     )
 
-    # Nếu model không vượt baseline persistence, champion serving sẽ được gắn cờ fallback
+    prediction = pipeline.predict(test_frame[columns])
+    baselines = evaluate_baselines(test_frame, target, config["thresholds"])
+    test_metrics = regression_and_classification_metrics(
+        test_frame["target_next_hour"],
+        prediction,
+        config["thresholds"],
+    )
+
     champion_name = candidate_champion
+    serving_residual_q90 = ml_residual_q90
     if not quality_gate["passes_baseline"]:
         champion_name = "persistence"
-
-    residual_quantile = backtest[candidate_champion]["residual_quantile_90"]
+        serving_residual_q90 = pers_residual_q90
 
     artifact_dir = Path(config["artifacts"]["directory"])
     model_path = artifact_dir / config["artifacts"]["model_file"]
@@ -291,7 +342,13 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
         "data_audit": audit_air_quality(raw, config),
         "baselines": baselines,
         "backtest": backtest,
-        "champion_test": metrics,
+        "calibration": {
+            "ml_metrics": cal_ml_metrics,
+            "persistence_metrics": cal_pers_metrics,
+            "ml_residual_quantile_90": ml_residual_q90,
+            "persistence_residual_quantile_90": pers_residual_q90,
+        },
+        "champion_test": test_metrics,
         "quality_gate": quality_gate,
         "metrics_by_station": metrics_by_station(
             test_frame,
@@ -313,13 +370,21 @@ def train(config_path: str, persist_artifacts: bool = True) -> dict:
         "sklearn_version": sklearn.__version__,
         "features": columns,
         "train_period": [str(train_frame[timestamp].min()), str(train_frame[timestamp].max())],
+        "calibration_period": [
+            str(eval_cal_frame[timestamp].min()),
+            str(eval_cal_frame[timestamp].max()),
+        ]
+        if not eval_cal_frame.empty
+        else [],
         "test_period": [str(test_frame[timestamp].min()), str(test_frame[timestamp].max())],
-        "metrics": metrics,
+        "metrics": test_metrics,
         "quality_gate": quality_gate,
         "prediction_interval": {
             "method": "split_conformal",
             "coverage": 0.9,
-            "residual_quantile": round(residual_quantile, 4),
+            "residual_quantile": round(serving_residual_q90, 4),
+            "ml_residual_quantile": round(ml_residual_q90, 4),
+            "persistence_residual_quantile": round(pers_residual_q90, 4),
         },
         "thresholds": config["thresholds"],
         "model_path": str(model_path),
@@ -341,7 +406,9 @@ def log_mlflow(config: dict, metadata: dict, evaluation: dict, model_path: Path)
     mlflow.set_tracking_uri(config["mlflow"]["tracking_uri"])
     mlflow.set_experiment(config["mlflow"]["experiment_name"])
     with mlflow.start_run(run_name=metadata["model_name"]):
-        mlflow.log_params({"model_name": metadata["model_name"], "seed": config["project"]["random_state"]})
+        mlflow.log_params(
+            {"model_name": metadata["model_name"], "seed": config["project"]["random_state"]}
+        )
         scalar_metrics = {
             key: value
             for key, value in metadata["metrics"].items()
@@ -356,9 +423,13 @@ def log_mlflow(config: dict, metadata: dict, evaluation: dict, model_path: Path)
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Huấn luyện và chọn mô hình dự báo PM2.5 giờ kế tiếp")
+    parser = argparse.ArgumentParser(
+        description="Huấn luyện và chọn mô hình dự báo PM2.5 giờ kế tiếp"
+    )
     parser.add_argument("--config", default="configs/config.yaml")
-    parser.add_argument("--dry-run", action="store_true", help="Chạy toàn bộ đánh giá nhưng không ghi artifact")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Chạy toàn bộ đánh giá nhưng không ghi artifact"
+    )
     args = parser.parse_args()
     result = train(args.config, persist_artifacts=not args.dry_run)
     if args.dry_run:

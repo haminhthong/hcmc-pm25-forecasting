@@ -13,9 +13,10 @@ features:
   rolling_windows: [3, 6, 24]
   exogenous_columns: [TSP, NO2, SO2, CO, O3, temperature, humidity]
 split:
-  test_fraction: 0.2
+  test_fraction: 0.1
+  calibration_fraction: 0.1
   backtest_folds: 3
-  minimum_train_periods: 24
+  minimum_train_periods: 12
 model:
   name: random_forest
   params:

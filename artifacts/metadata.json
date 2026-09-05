@@ -1,6 +1,6 @@
 {
   "model_version": "2026-09-01-001",
-  "created_at": "2026-09-01T15:50:47.313707+00:00",
+  "created_at": "2026-09-05T02:56:27.117982+00:00",
   "model_name": "extra_trees",
   "serving_champion": "persistence",
   "selection_rule": "MAE trung bình thấp nhất trên expanding-window backtest của tập train",
@@ -33,17 +33,21 @@
   ],
   "train_period": [
     "2024-01-01 00:00:00",
-    "2024-01-02 02:00:00"
+    "2024-01-02 01:00:00"
+  ],
+  "calibration_period": [
+    "2024-01-02 03:00:00",
+    "2024-01-02 05:00:00"
   ],
   "test_period": [
-    "2024-01-02 04:00:00",
+    "2024-01-02 07:00:00",
     "2024-01-02 10:00:00"
   ],
   "metrics": {
-    "mae": 3.9525029761904666,
-    "rmse": 4.00535282208693,
-    "bias": -3.9525029761904666,
-    "p90_absolute_error": 4.832889166666659,
+    "mae": 6.260859895833339,
+    "rmse": 6.268651740243854,
+    "bias": -6.260859895833339,
+    "p90_absolute_error": 6.615632083333324,
     "macro_f1": 0.2222222222222222,
     "qwk": 0.0,
     "confusion_matrix": [
@@ -54,12 +58,12 @@
       ],
       [
         0,
-        7,
+        4,
         0
       ],
       [
         0,
-        7,
+        4,
         0
       ]
     ],
@@ -74,36 +78,36 @@
         "precision": 0.5,
         "recall": 1.0,
         "f1-score": 0.6666666666666666,
-        "support": 7.0
+        "support": 4.0
       },
       "Cao": {
         "precision": 0.0,
         "recall": 0.0,
         "f1-score": 0.0,
-        "support": 7.0
+        "support": 4.0
       },
       "accuracy": 0.5,
       "macro avg": {
         "precision": 0.16666666666666666,
         "recall": 0.3333333333333333,
         "f1-score": 0.2222222222222222,
-        "support": 14.0
+        "support": 8.0
       },
       "weighted avg": {
         "precision": 0.25,
         "recall": 0.5,
         "f1-score": 0.3333333333333333,
-        "support": 14.0
+        "support": 8.0
       }
     },
-    "high_pm25_mae": 4.331526190476181,
+    "high_pm25_mae": 6.422365624999998,
     "high_pm25_recall": 0.0
   },
   "quality_gate": {
     "passes_baseline": false,
-    "mae_improvement_vs_persistence": -8.191867386489458,
+    "mae_improvement_vs_persistence": -4.387189495529994,
     "high_pm25_recall": 0.0,
-    "rolling_mae_std": 0.21815643912989172,
+    "rolling_mae_std": 0.7896892045324811,
     "checks": {
       "mae_improvement_ge_5pct": false,
       "high_recall_ge_75pct": false,
@@ -114,7 +118,9 @@
   "prediction_interval": {
     "method": "split_conformal",
     "coverage": 0.9,
-    "residual_quantile": 2.841
+    "residual_quantile": 1.05,
+    "ml_residual_quantile": 5.5923,
+    "persistence_residual_quantile": 1.05
   },
   "thresholds": {
     "source": "experimental",

@@ -47,7 +47,9 @@ else:
             c3.metric("Mức phân tích", result["level"])
 
             interval = result.get("interval", {})
-            interval_str = f"[{interval.get('lower', 0):.1f} - {interval.get('upper', 0):.1f}] µg/m³"
+            interval_str = (
+                f"[{interval.get('lower', 0):.1f} - {interval.get('upper', 0):.1f}] µg/m³"
+            )
             c4.metric("Khoảng dự báo (90% Conformal)", interval_str)
 
             st.info(
@@ -108,5 +110,6 @@ else:
             st.error(f"Lỗi API HTTP {response.status_code}")
 
     except requests.RequestException:
-        st.warning("Không thể kết nối đến API server. Hãy đảm bảo API đang chạy tại http://localhost:8000")
-
+        st.warning(
+            "Không thể kết nối đến API server. Hãy đảm bảo API đang chạy tại http://localhost:8000"
+        )

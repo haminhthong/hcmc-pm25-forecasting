@@ -28,5 +28,7 @@ def build_model(
             random_state=random_state,
         )
     if name == "hist_gradient_boosting":
-        return HistGradientBoostingRegressor(max_iter=200, learning_rate=0.05, random_state=random_state)
+        return HistGradientBoostingRegressor(
+            max_iter=200, learning_rate=0.05, random_state=random_state
+        )
     raise ValueError(f"Mô hình không được hỗ trợ: {name}")

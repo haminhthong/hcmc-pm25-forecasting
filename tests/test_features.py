@@ -5,14 +5,20 @@ from src.data import audit_air_quality, validate_config, validate_schema
 from src.features import build_features
 
 CONFIG = {
-    "data": {"station_column": "station", "timestamp_column": "timestamp", "target_column": "PM2.5"},
+    "data": {
+        "station_column": "station",
+        "timestamp_column": "timestamp",
+        "target_column": "PM2.5",
+    },
     "features": {"lags": [1], "rolling_windows": [2], "exogenous_columns": ["O3", "SO2"]},
 }
 
 
 def test_schema_csv():
     with pytest.raises(ValueError, match="station"):
-        validate_schema(pd.DataFrame({"timestamp": [], "PM2.5": []}), ["timestamp", "station", "PM2.5"])
+        validate_schema(
+            pd.DataFrame({"timestamp": [], "PM2.5": []}), ["timestamp", "station", "PM2.5"]
+        )
 
 
 def test_sort_and_lag_do_not_use_future():

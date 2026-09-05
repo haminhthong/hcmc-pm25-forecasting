@@ -25,8 +25,13 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(f"Cấu hình thiếu section: {', '.join(missing_sections)}")
 
     test_fraction = config["split"].get("test_fraction")
+    calibration_fraction = config["split"].get("calibration_fraction", 0.1)
     if not isinstance(test_fraction, int | float) or not 0 < test_fraction < 1:
         raise ValueError("split.test_fraction phải nằm trong khoảng (0, 1).")
+    if not isinstance(calibration_fraction, int | float) or not 0 <= calibration_fraction < 1:
+        raise ValueError("split.calibration_fraction phải nằm trong khoảng [0, 1).")
+    if test_fraction + calibration_fraction >= 1:
+        raise ValueError("Tổng test_fraction và calibration_fraction phải nhỏ hơn 1.")
 
     folds = config["split"].get("backtest_folds")
     minimum_periods = config["split"].get("minimum_train_periods")
@@ -46,7 +51,6 @@ def validate_config(config: dict[str, Any]) -> None:
     medium_max = config["thresholds"].get("medium_max", config["thresholds"].get("moderate_max"))
     if low_max is None or medium_max is None or low_max >= medium_max:
         raise ValueError("thresholds.low_max phải nhỏ hơn thresholds.medium_max.")
-
 
 
 def resolve_data_path(configured_path: str | Path) -> Path:

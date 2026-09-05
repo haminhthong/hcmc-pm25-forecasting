@@ -38,7 +38,7 @@ class Interval(BaseModel):
 
     lower: float
     upper: float
-    coverage: float = 0.9
+    coverage: float = Field(default=0.9, ge=0.0, le=1.0)
 
 
 class PredictionResponse(BaseModel):
@@ -86,11 +86,11 @@ def health():
             "status": "ready",
             "model_loaded": True,
         }
-    except Exception:
+    except Exception as err:
         raise HTTPException(
             status_code=503,
             detail="Mô hình chưa sẵn sàng.",
-        )
+        ) from err
 
 
 @app.post("/predict", response_model=PredictionResponse)
@@ -108,7 +108,7 @@ def predict(request: PredictionRequest):
             status_code=400,
             content={"code": "INVALID_INPUT", "message": str(error)},
         )
-    except FileNotFoundError as error:
+    except FileNotFoundError:
         return JSONResponse(
             status_code=503,
             detail="Mô hình hoặc artifact chưa sẵn sàng.",
@@ -118,4 +118,3 @@ def predict(request: PredictionRequest):
             status_code=500,
             content={"code": "INTERNAL_ERROR", "message": "Lỗi nội bộ hệ thống."},
         )
-

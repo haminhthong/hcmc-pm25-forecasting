@@ -5,7 +5,11 @@ from src.data import audit_air_quality, validate_config, validate_schema
 
 CONFIG = {
     "project": {"random_state": 42},
-    "data": {"station_column": "station", "timestamp_column": "timestamp", "target_column": "PM2.5"},
+    "data": {
+        "station_column": "station",
+        "timestamp_column": "timestamp",
+        "target_column": "PM2.5",
+    },
     "features": {"lags": [1], "rolling_windows": [2], "exogenous_columns": ["O3", "SO2"]},
     "split": {"test_fraction": 0.2, "backtest_folds": 2, "minimum_train_periods": 24},
     "model": {"name": "random_forest"},
@@ -16,7 +20,9 @@ CONFIG = {
 
 def test_schema_csv_missing_column():
     with pytest.raises(ValueError, match="station"):
-        validate_schema(pd.DataFrame({"timestamp": [], "PM2.5": []}), ["timestamp", "station", "PM2.5"])
+        validate_schema(
+            pd.DataFrame({"timestamp": [], "PM2.5": []}), ["timestamp", "station", "PM2.5"]
+        )
 
 
 def test_data_audit_detects_duplicates_and_gaps():
@@ -36,6 +42,10 @@ def test_data_audit_detects_duplicates_and_gaps():
 
 def test_config_rejects_invalid_test_fraction():
     invalid_config = CONFIG.copy()
-    invalid_config["split"] = {"test_fraction": 1.5, "backtest_folds": 2, "minimum_train_periods": 24}
+    invalid_config["split"] = {
+        "test_fraction": 1.5,
+        "backtest_folds": 2,
+        "minimum_train_periods": 24,
+    }
     with pytest.raises(ValueError, match="test_fraction"):
         validate_config(invalid_config)

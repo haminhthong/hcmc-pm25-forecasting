@@ -23,14 +23,14 @@ Tại thời điểm $t$, sử dụng dữ liệu quan trắc đã biết đến
 
 ## Protocol Lựa Chọn & Quality Gate
 
-1. Tách tập test theo mốc thời gian sao cho `target_timestamp` ($t+1\text{h}$) của train strictly nhỏ hơn `test_start`.
-2. Chạy expanding-window backtest trên phần train với `target_timestamp` nhỏ hơn `validation_start` trong từng fold.
-3. Tính residual quantile 90% bằng Split Conformal Prediction.
-4. Đánh giá Quality Gate:
+1. Tách dữ liệu theo mốc thời gian thành 3 tập: Train/Backtest, Calibration độc lập, và Test cuối sao cho `target_timestamp` ($t+1\text{h}$) không vượt mốc bắt đầu của tập tiếp theo.
+2. Chạy expanding-window backtest trên tập Train với `target_timestamp` nhỏ hơn `validation_start` trong từng fold để chọn Candidate Champion có MAE trung bình thấp nhất.
+3. Fit Candidate Champion trên tập Train và tính residual quantile 90% (Split Conformal Prediction) trên tập Calibration độc lập cho cả candidate ML (`ml_residual_quantile`) lẫn baseline Persistence (`persistence_residual_quantile`).
+4. Đánh giá Quality Gate trên tập Calibration:
    - $MAE_{\text{model}} \le MAE_{\text{persistence}} \times 0.95$
    - Recall nhóm PM2.5 cao $\ge 0.75$
    - Rolling MAE std $\le 1.0$
-5. Nếu mô hình không vượt baseline hoặc không đạt Quality Gate, hệ thống sử dụng **Persistence Baseline** làm champion cho suy luận.
+5. Nếu mô hình không đạt Quality Gate, hệ thống tự động sử dụng **Persistence Baseline** làm champion cho suy luận và áp dụng `persistence_residual_quantile` cho khoảng tin cậy. Đánh giá độc lập trên tập Test cuối.
 
 ## Metric Đánh Giá
 

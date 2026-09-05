@@ -65,7 +65,9 @@ def add_time_features(frame: pd.DataFrame, timestamp_column: str) -> pd.DataFram
     return result
 
 
-def build_features(frame: pd.DataFrame, config: dict[str, Any], include_target: bool = True) -> pd.DataFrame:
+def build_features(
+    frame: pd.DataFrame, config: dict[str, Any], include_target: bool = True
+) -> pd.DataFrame:
     """Tạo đặc trưng chỉ từ quan sát hiện tại/quá khứ trong từng trạm."""
     data_config = config["data"]
     station = data_config["station_column"]
@@ -115,7 +117,9 @@ def model_feature_columns(config: dict[str, Any]) -> list[str]:
     """Trả về danh sách cột đầu vào theo đúng thứ tự của model."""
     target = config["data"]["target_column"]
     history = [f"{target}_lag_{lag}" for lag in config["features"]["lags"]]
-    rolling = [f"{target}_rolling_mean_{window}" for window in config["features"]["rolling_windows"]]
+    rolling = [
+        f"{target}_rolling_mean_{window}" for window in config["features"]["rolling_windows"]
+    ]
     return [
         target,
         *history,

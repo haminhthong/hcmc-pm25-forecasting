@@ -8,13 +8,21 @@ from src.predict import Predictor
 @pytest.fixture
 def sample_config():
     return {
-        "data": {"station_column": "station", "timestamp_column": "timestamp", "target_column": "PM2.5"},
+        "data": {
+            "station_column": "station",
+            "timestamp_column": "timestamp",
+            "target_column": "PM2.5",
+        },
         "features": {
             "lags": [1, 2, 3, 6, 12, 24],
             "rolling_windows": [3, 6, 24],
             "exogenous_columns": ["O3", "SO2"],
         },
-        "thresholds": {"low_max": 12.0, "medium_max": 35.5, "labels": ["Thấp", "Trung bình", "Cao"]},
+        "thresholds": {
+            "low_max": 12.0,
+            "medium_max": 35.5,
+            "labels": ["Thấp", "Trung bình", "Cao"],
+        },
         "artifacts": {"directory": "artifacts", "model_file": "model.joblib"},
     }
 
@@ -65,7 +73,9 @@ def test_prediction_rejects_duplicate_timestamps(sample_config, monkeypatch):
     monkeypatch.setattr("joblib.load", lambda path: FakeModel())
     predictor = Predictor(sample_config)
 
-    dates = list(pd.date_range("2024-01-01", periods=24, freq="h")) + [pd.Timestamp("2024-01-01 00:00")]
+    dates = list(pd.date_range("2024-01-01", periods=24, freq="h")) + [
+        pd.Timestamp("2024-01-01 00:00")
+    ]
     records = pd.DataFrame(
         {
             "timestamp": dates,
@@ -98,6 +108,7 @@ def test_prediction_rejects_negative_pm25(sample_config, monkeypatch):
 
 def test_missing_o3_so2_can_be_predicted_end_to_end(sample_config, monkeypatch):
     """Kiểm tra truyền dữ liệu thiếu hoàn toàn O3/SO2 qua pipeline dự báo vẫn trả kết quả hợp lệ."""
+
     class FakeModel:
         def predict(self, df):
             return np.array([25.4])
@@ -119,3 +130,37 @@ def test_missing_o3_so2_can_be_predicted_end_to_end(sample_config, monkeypatch):
     assert res["predicted_pm25"] == 25.4
     assert np.isfinite(res["predicted_pm25"])
     assert res["level"] in ["Thấp", "Trung bình", "Cao"]
+
+
+def test_persistence_champion_fallback(sample_config, monkeypatch):
+    """Kiểm tra fallback khi serving_champion là persistence."""
+
+    class FakeModel:
+        def predict(self, df):
+            return np.array([999.0])  # Giá trị bất kỳ không được gọi
+
+    monkeypatch.setattr("joblib.load", lambda path: FakeModel())
+    predictor = Predictor(sample_config)
+    predictor.metadata = {
+        "serving_champion": "persistence",
+        "prediction_interval": {
+            "method": "split_conformal",
+            "coverage": 0.95,
+            "residual_quantile": 3.5,
+            "ml_residual_quantile": 10.0,
+            "persistence_residual_quantile": 3.5,
+        },
+    }
+
+    records = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=25, freq="h"),
+            "station": ["A"] * 25,
+            "PM2.5": [12.0] * 24 + [18.5],
+        }
+    )
+    res = predictor.predict(records)
+    assert res["predicted_pm25"] == 18.5  # Lấy quan trắc mới nhất thay vì 999.0 của FakeModel
+    assert res["interval"]["coverage"] == 0.95
+    assert res["interval"]["lower"] == 15.0  # 18.5 - 3.5
+    assert res["interval"]["upper"] == 22.0  # 18.5 + 3.5
